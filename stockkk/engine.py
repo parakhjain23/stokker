@@ -9,8 +9,14 @@ from stockkk import ai, config, data, db, indicators, news, setups
 log = logging.getLogger(__name__)
 
 
+def liquid(d: pd.DataFrame) -> bool:
+    return len(d) >= 60 and (d["close"] * d["volume"]).tail(20).mean() >= config.MIN_TRADED_VALUE
+
+
 def build_frames(prices: dict[str, pd.DataFrame], symbols) -> dict[str, pd.DataFrame]:
-    return {s: indicators.add_all(prices[s]) for s in symbols if s in prices and len(prices[s]) >= 60}
+    """Indicator frames for liquid stocks only (thinly traded stocks are hard to trade and easy to move).
+    ponytail: liquidity is judged on today's volume, also for the backtest; fine for a screen, not for research."""
+    return {s: indicators.add_all(prices[s]) for s in symbols if s in prices and liquid(prices[s])}
 
 
 def latest_date(frames: dict[str, pd.DataFrame]):
@@ -53,8 +59,8 @@ def _win_stats(st: dict) -> tuple[float, float]:
 
 
 def find_candidates(frames: dict, uni: pd.DataFrame, stats: dict, as_of) -> dict[str, list[dict]]:
-    """Signals on the latest bar from enabled setups. Symbols without a bar for as_of are excluded (AE1)."""
-    info = uni.set_index("symbol")
+    """Every stock matching any backtested setup on the latest bar. Stale symbols are excluded (AE1)."""
+    info = uni.drop_duplicates("symbol").set_index("symbol")
     sector_ret = {}
     for s, d in frames.items():
         if s in info.index:
@@ -63,7 +69,7 @@ def find_candidates(frames: dict, uni: pd.DataFrame, stats: dict, as_of) -> dict
     out = {h: [] for h in config.HORIZONS}
     for setup in setups.SETUPS:
         st = stats.get(setup.name)
-        if not st:
+        if not st or st["hit_rate"] is None:
             continue
         p, r = _win_stats(st)
         for sym, d in frames.items():
@@ -76,24 +82,21 @@ def find_candidates(frames: dict, uni: pd.DataFrame, stats: dict, as_of) -> dict
             rr = round(abs(lv["target"] - lv["entry"]) / abs(lv["entry"] - lv["stop"]), 2)
             out[setup.horizon].append({
                 "symbol": sym, "name": info.at[sym, "name"], "industry": info.at[sym, "industry"],
-                "setup": setup.name, "setup_rule": setup.description, **lv, "rr": rr,
+                "setup": setup.name, "setup_rule": setup.description, "setup_proven": bool(st["enabled"]),
+                **lv, "rr": rr,
                 "entry_type": "stop order: only if price trades through entry next session" if lv["trigger"]
                               else "near last close",
                 "backtest_win_prob": round(p, 3), "backtest_avg_r": round(r, 3), "backtest_trades": st["trades"],
                 "indicators": indicators.snapshot(row),
                 "sector_ret20_pct": round(sector_ret.get(info.at[sym, "industry"], float("nan")) * 100, 2),
             })
-    for h in out:  # best setups first, then strongest stocks
-        out[h].sort(key=lambda c: (c["backtest_avg_r"], c["indicators"]["ret20"] or 0), reverse=True)
     return out
 
 
 def enrich(con, horizon: str, cands: list[dict]) -> list[dict]:
-    """Attach fundamentals and news to the top candidates. Long-term needs a profitable company."""
+    """Attach fundamentals and news. Long-term needs a profitable company."""
     kept = []
     for c in cands:
-        if len(kept) >= config.MAX_CANDIDATES:
-            break
         f = data.fundamentals(con, c["symbol"])
         if horizon == "longterm" and not (f.get("pe") and f["pe"] > 0):
             continue  # loss-making or P/E unavailable
@@ -105,34 +108,54 @@ def enrich(con, horizon: str, cands: list[dict]) -> list[dict]:
     return kept
 
 
-def _insert(con, rec: dict) -> None:
-    cols = ",".join(rec)
-    con.execute(f"INSERT INTO recommendations ({cols}) VALUES ({','.join('?' * len(rec))})", tuple(rec.values()))
+def _insert(con, table: str, rec: dict) -> None:
+    con.execute(f"INSERT INTO {table} ({','.join(rec)}) VALUES ({','.join('?' * len(rec))})", tuple(rec.values()))
 
 
-def publish(con, horizon: str, cands: list[dict], picks: list, ai_reason: str, as_of: str) -> int:
-    """Store picks that clear the thresholds, or one NO TRADE row (R11, R12)."""
-    by_sym = {c["symbol"]: c for c in cands}
-    n = 0
-    for pk in picks:
-        c = by_sym[pk.symbol]
-        win = min(max(c["backtest_win_prob"] * 100 + pk.confidence_adj, 0), 100)
-        exp_r = c["backtest_avg_r"] + pk.confidence_adj / 100 * (c["rr"] + 1)
-        if c["rr"] < config.MIN_RR[horizon] or exp_r < config.MIN_EXPECTED_R:
-            continue
-        _insert(con, {
-            "created_at": db.now(), "horizon": horizon, "symbol": c["symbol"], "name": c["name"],
-            "direction": c["direction"], "entry": c["entry"], "stop": c["stop"], "target": c["target"],
-            "rr": c["rr"], "hold_days": c["hold_days"], "trigger": int(c["trigger"]),
-            "confidence": round(win, 1), "expected_r": round(exp_r, 2), "setup": c["setup"],
-            "reasoning": pk.reasoning, "technical": pk.technical, "fundamental": pk.fundamental,
-            "news": pk.news, "invalidation": pk.invalidation, "data_as_of": as_of})
-        n += 1
-    if n == 0:
-        reason = ai_reason or "No setup met the quality threshold (risk-reward and expected return)."
-        _insert(con, {"created_at": db.now(), "horizon": horizon, "status": "NO_TRADE",
-                      "reasoning": reason, "data_as_of": as_of})
+def no_trade(con, horizon: str, reason: str, as_of: str) -> None:
+    _insert(con, "recommendations", {"created_at": db.now(), "horizon": horizon, "status": "NO_TRADE",
+                                     "reasoning": reason, "data_as_of": as_of})
     con.commit()
+
+
+def score(c: dict, a) -> tuple[float, float]:
+    """Final win probability (%) and expected R after the AI adjustment."""
+    adj = a.confidence_adj if a else 0
+    win = min(max(c["backtest_win_prob"] * 100 + adj, 0), 100)
+    return round(win, 1), round(c["backtest_avg_r"] + adj / 100 * (c["rr"] + 1), 2)
+
+
+def publish(con, horizon: str, cands: list[dict], assessed: dict, as_of: str) -> int:
+    """Rank every candidate (1 = highest win chance) and store the list. Publish as tracked calls
+    only those that clear the quality bar; if none do, publish NO TRADE (R11, R12)."""
+    rows = []
+    for c in cands:
+        a = assessed.get(c["symbol"])
+        win, exp_r = score(c, a)
+        ok = (c["setup_proven"] and a is not None and a.verdict == "TAKE"
+              and c["rr"] >= config.MIN_RR[horizon] and exp_r >= config.MIN_EXPECTED_R)
+        rows.append((c, a, win, exp_r, ok))
+    rows.sort(key=lambda x: (x[2], x[3]), reverse=True)
+    n = 0
+    for rank, (c, a, win, exp_r, ok) in enumerate(rows, 1):
+        common = {"created_at": db.now(), "horizon": horizon, "symbol": c["symbol"], "name": c["name"],
+                  "direction": c["direction"], "entry": c["entry"], "stop": c["stop"], "target": c["target"],
+                  "rr": c["rr"], "hold_days": c["hold_days"], "trigger": int(c["trigger"]), "setup": c["setup"],
+                  "reasoning": a.reasoning if a else "Not assessed by AI.",
+                  "invalidation": a.invalidation if a else None, "data_as_of": as_of}
+        _insert(con, "candidates", {**common, "rank": rank, "setup_proven": int(c["setup_proven"]),
+                                    "win_prob": win, "expected_r": exp_r,
+                                    "ai_verdict": a.verdict if a else "NOT ASSESSED", "recommended": int(ok)})
+        if ok:
+            _insert(con, "recommendations", {**common, "confidence": win, "expected_r": exp_r,
+                                             "technical": a.technical, "fundamental": a.fundamental, "news": a.news})
+            n += 1
+    con.commit()
+    if n == 0:
+        proven = any(c["setup_proven"] for c in cands)
+        no_trade(con, horizon, f"{len(cands)} stocks matched a pattern, but none cleared the quality bar."
+                 if proven else f"{len(cands)} stocks matched a pattern, but no pattern for this horizon has a "
+                 "proven backtested edge, so nothing is recommended. See the ranked list.", as_of)
     return n
 
 
@@ -148,7 +171,7 @@ def run(con, prices: dict | None = None) -> dict:
     db.set_meta(con, "overview", json.dumps(overview, default=str))
     market = {"as_of": overview["as_of"], "indices": overview["indices"], "breadth": overview["breadth"],
               "top_sectors": overview["sectors"][:3], "bottom_sectors": overview["sectors"][-3:]}
-    stats = setups.enabled_stats(con)
+    stats = {r["setup"]: dict(r) for r in con.execute("SELECT * FROM setup_stats")}
     cands = find_candidates(frames, uni, stats, as_of)
     summary = {}
     for h in config.HORIZONS:
@@ -156,26 +179,23 @@ def run(con, prices: dict | None = None) -> dict:
             summary[h] = "already published"
             continue
         if not cands[h]:
-            has_setup = any(s.horizon == h and s.name in stats for s in setups.SETUPS)
-            reason = ("No setup triggered on the latest data." if has_setup else
-                      "No setup for this horizon currently shows a backtested edge, so nothing is recommended.")
-            publish(con, h, [], [], reason, as_of_s)
-            summary[h] = "NO TRADE"
+            no_trade(con, h, "No stock matched any pattern on the latest data.", as_of_s)
+            summary[h] = "NO TRADE (no matches)"
             continue
         top = enrich(con, h, cands[h])
         if not top:
-            publish(con, h, [], [], "No candidate passed the fundamental filter.", as_of_s)
+            no_trade(con, h, "No candidate passed the fundamental filter.", as_of_s)
             summary[h] = "NO TRADE"
             continue
         try:
-            picks, reason = ai.rank(h, top, market)
+            assessed = ai.assess(h, top, market)
         except ai.AIUnavailable as e:
             db.set_meta(con, f"ai_status_{h}", f"AI unavailable: {e}")
             summary[h] = "AI unavailable"
-            continue  # nothing published; next run retries
+            continue  # nothing stored; next run retries
         db.set_meta(con, f"ai_status_{h}", "ok")
-        n = publish(con, h, top, picks, reason, as_of_s)
-        summary[h] = f"{n} published" if n else "NO TRADE"
+        n = publish(con, h, top, assessed, as_of_s)
+        summary[h] = f"{len(top)} ranked, {n} recommended"
     return summary
 
 

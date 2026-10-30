@@ -41,14 +41,26 @@ def _backtest(con):
 
 @_job("eod")
 def job_eod(con):
-    period = "1mo" if data.has_history(con) else config.BACKTEST_PERIOD
-    fetched = data.fetch_prices(con, list(data.universe()["symbol"]), period)
-    data.fetch_prices(con, list(config.INDICES), period, use_fallback=False)
+    data.refresh_universe()
+    counts = data.history_counts(con)
+    syms = list(data.universe()["symbol"])
+    new = [s for s in syms if counts.get(s, 0) < 200]   # new stocks need full history for the backtest
+    old = [s for s in syms if counts.get(s, 0) >= 200]
+    fetched = {"ok": 0, "failed": []}
+    for group, period in ((new, config.BACKTEST_PERIOD), (old, "1mo")):
+        if group:
+            r = data.fetch_prices(con, group, period)
+            fetched["ok"] += r["ok"]
+            fetched["failed"] += r["failed"]
+    idx_period = "1mo" if counts.get("^NSEI", 0) >= 200 else config.BACKTEST_PERIOD
+    data.fetch_prices(con, list(config.INDICES), idx_period, use_fallback=False)
+    if new:
+        _backtest(con)  # new stocks change the backtest sample
     news.fetch_market_news(con)
     prices = data.load_prices(con)
     graded = setups.grade_open(con, prices)
     setups.update_live_stats(con)
-    if not con.execute("SELECT 1 FROM setup_stats").fetchone():
+    if not new and not con.execute("SELECT 1 FROM setup_stats").fetchone():
         _backtest(con)
     summary = engine.run(con, prices)
     engine.refresh_brief(con)

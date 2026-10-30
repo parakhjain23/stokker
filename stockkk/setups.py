@@ -198,6 +198,3 @@ def update_live_stats(con) -> None:
                         (f"live hit rate {hit:.0%} below {config.MIN_LIVE_HIT_RATE:.0%} over {n} calls", s.name))
     con.commit()
 
-
-def enabled_stats(con) -> dict[str, dict]:
-    return {r["setup"]: dict(r) for r in con.execute("SELECT * FROM setup_stats WHERE enabled=1")}

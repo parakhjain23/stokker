@@ -1,4 +1,4 @@
-"""Gemini ranks and explains pre-qualified candidates. It never sets prices.
+"""Gemini judges every pre-qualified candidate. It never sets prices.
 
 Entry, stop and target come from coded setups. Gemini may only pick from the given
 candidates, explain them, and nudge the win probability by at most MAX_AI_ADJ points.
@@ -18,8 +18,9 @@ class AIUnavailable(Exception):
     pass
 
 
-class Pick(BaseModel):
+class Assessment(BaseModel):
     symbol: str
+    verdict: str          # TAKE or SKIP
     confidence_adj: int
     reasoning: str
     technical: str
@@ -29,8 +30,7 @@ class Pick(BaseModel):
 
 
 class Reply(BaseModel):
-    picks: list[Pick]
-    no_trade_reason: str
+    assessments: list[Assessment]
 
 
 RULES = """You are a cautious equity research analyst for the Indian stock market (NSE).
@@ -42,19 +42,19 @@ Hard rules:
   weak fundamentals (for long-term), overextended moves, or a hostile market backdrop.
 """
 
-RANK_PROMPT = RULES + """
+ASSESS_PROMPT = RULES + """
 Horizon: {horizon}
 Market context: {market}
 
 Each candidate already has entry, stop, target and a backtested win probability from a coded setup.
-Pick at most {max_picks} of them, best first. Return zero picks if none are good enough.
-For each pick:
+"setup_proven" is false when that setup has no proven edge in the backtest: be extra sceptical.
+Assess EVERY candidate, one entry per symbol:
+- verdict: "TAKE" only for a strong, clean setup you would act on; otherwise "SKIP".
 - confidence_adj: integer from -{max_adj} to {max_adj}, your adjustment to the backtested win probability
   (in percentage points) from news, fundamentals and market context.
-- reasoning: 2-4 sentences on why this trade, now.
-- technical / fundamental / news: one or two sentences each, citing the input numbers.
+- reasoning: 1-3 sentences on why take or skip, now.
+- technical / fundamental / news: one sentence each, citing the input numbers.
 - invalidation: concrete conditions that cancel the idea (price levels, events).
-no_trade_reason: if you return zero picks, one sentence why; otherwise an empty string.
 
 Candidates (JSON):
 {candidates}
@@ -94,31 +94,35 @@ def _generate(prompt: str, schema=None) -> str:
     raise AIUnavailable("Gemini did not respond after 3 attempts")
 
 
-def validate(reply: Reply, symbols: set[str]) -> list[Pick]:
-    """Drop picks outside the candidate list or with out-of-range adjustments (AE3)."""
-    seen, picks = set(), []
-    for p in reply.picks:
-        if p.symbol not in symbols or p.symbol in seen:
-            log.warning("Discarding AI pick %s: not in candidate list or duplicate", p.symbol)
+def validate(reply: Reply, symbols: set[str]) -> dict[str, Assessment]:
+    """Drop assessments outside the candidate list or with out-of-range adjustments (AE3)."""
+    out = {}
+    for a in reply.assessments:
+        if a.symbol not in symbols or a.symbol in out:
+            log.warning("Discarding AI assessment %s: not in candidate list or duplicate", a.symbol)
             continue
-        if abs(p.confidence_adj) > config.MAX_AI_ADJ:
-            log.warning("Discarding AI pick %s: confidence_adj %d out of range", p.symbol, p.confidence_adj)
+        if abs(a.confidence_adj) > config.MAX_AI_ADJ:
+            log.warning("Discarding AI assessment %s: confidence_adj %d out of range", a.symbol, a.confidence_adj)
             continue
-        seen.add(p.symbol)
-        picks.append(p)
-    return picks[: config.MAX_PICKS]
+        a.verdict = "TAKE" if a.verdict.strip().upper() == "TAKE" else "SKIP"
+        out[a.symbol] = a
+    return out
 
 
-def rank(horizon: str, candidates: list[dict], market: dict) -> tuple[list[Pick], str]:
-    prompt = RANK_PROMPT.format(horizon=horizon, market=json.dumps(market, default=str),
-                                max_picks=config.MAX_PICKS, max_adj=config.MAX_AI_ADJ,
-                                candidates=json.dumps(candidates, default=str))
-    text = _generate(prompt, Reply)
-    try:
-        reply = Reply.model_validate_json(text)
-    except Exception as e:
-        raise AIUnavailable(f"Gemini returned invalid JSON: {e}") from e
-    return validate(reply, {c["symbol"] for c in candidates}), reply.no_trade_reason
+def assess(horizon: str, candidates: list[dict], market: dict) -> dict[str, Assessment]:
+    """Gemini judges every candidate, in batches. Candidates it skips get no assessment."""
+    out = {}
+    for i in range(0, len(candidates), config.AI_BATCH):
+        batch = candidates[i:i + config.AI_BATCH]
+        prompt = ASSESS_PROMPT.format(horizon=horizon, market=json.dumps(market, default=str),
+                                      max_adj=config.MAX_AI_ADJ, candidates=json.dumps(batch, default=str))
+        text = _generate(prompt, Reply)
+        try:
+            reply = Reply.model_validate_json(text)
+        except Exception as e:
+            raise AIUnavailable(f"Gemini returned invalid JSON: {e}") from e
+        out |= validate(reply, {c["symbol"] for c in batch})
+    return out
 
 
 def market_brief(overview: dict, headlines: list[str]) -> str:

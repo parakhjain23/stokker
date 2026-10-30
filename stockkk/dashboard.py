@@ -51,6 +51,26 @@ def card(r):
             st.warning(f"**Invalidated if:** {r.invalidation}")
 
 
+def ranked_table(where: str, params: tuple, limit: int | None = None):
+    sql = ("SELECT rank AS Rank, symbol AS Symbol, name AS Company, horizon AS Horizon, direction AS Side, "
+           "entry AS Entry, stop AS \"Stop-loss\", target AS Target, win_prob AS \"Win %\", "
+           "expected_r AS \"Expected R\", setup AS Pattern, "
+           "CASE setup_proven WHEN 1 THEN 'yes' ELSE 'no' END AS \"Proven pattern\", ai_verdict AS \"AI verdict\", "
+           "CASE recommended WHEN 1 THEN '✅' ELSE '' END AS Recommended, reasoning AS \"AI reason\" "
+           f"FROM candidates WHERE {where} ORDER BY win_prob DESC, expected_r DESC")
+    df = q(sql + (f" LIMIT {limit}" if limit else ""), params)
+    if df.empty:
+        st.write("No stocks matched any pattern.")
+        return
+    if limit:  # overall list: re-number across horizons
+        df["Rank"] = range(1, len(df) + 1)
+    st.dataframe(df, hide_index=True, use_container_width=True,
+                 column_config={"Win %": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
+                                "AI reason": st.column_config.TextColumn(width="large")})
+    st.caption("Rank 1 = highest win chance (backtest + AI adjustment). Only rows marked Recommended pass the "
+               "quality bar: proven pattern, AI verdict TAKE, enough risk-reward and expected return.")
+
+
 def horizon_page(h):
     def page():
         st.header(LABEL[h])
@@ -70,6 +90,9 @@ def horizon_page(h):
         else:
             for _, r in today[today.status != "NO_TRADE"].iterrows():
                 card(r)
+        if as_of:
+            st.subheader("All matching stocks, ranked")
+            ranked_table("horizon=? AND data_as_of=?", (h, as_of))
         older = q("SELECT * FROM recommendations WHERE horizon=? AND status='OPEN' AND data_as_of<? ORDER BY data_as_of DESC",
                   (h, as_of or ""))
         if len(older):
@@ -88,6 +111,9 @@ def best():
         st.write("No setup met the quality bar on the latest data. Waiting is a position.")
     for _, r in df.iterrows():
         card(r)
+    if as_of:
+        st.subheader("Top 20 matches across all horizons")
+        ranked_table("data_as_of=?", (as_of,), limit=20)
     brief, at = meta("brief")
     if brief:
         st.subheader("Market brief")

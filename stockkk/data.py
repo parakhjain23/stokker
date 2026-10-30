@@ -22,10 +22,42 @@ MAX_GAP = 0.21          # NSE circuit limits cap most daily moves at 20%
 MAX_INDEX_MOVE = 0.05   # a >21% gap with a calm index is treated as bad data
 
 
+EQUITY_LIST = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+INDUSTRY_LIST = "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv"
+
+
+def refresh_universe(max_age_days: int = 7) -> None:
+    """All NSE stocks in the normal (EQ) series, with industry where NSE publishes it.
+    Refreshed weekly; on failure the previous file is kept."""
+    path = config.UNIVERSE_CSV
+    if path.exists() and time.time() - path.stat().st_mtime < max_age_days * 86400:
+        return
+    try:
+        import io
+        import urllib.request
+        def get(url):
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            return pd.read_csv(io.BytesIO(urllib.request.urlopen(req, timeout=30).read()))
+        eq = get(EQUITY_LIST)
+        eq.columns = eq.columns.str.strip()
+        eq = eq[eq["SERIES"].str.strip() == "EQ"].rename(columns={"SYMBOL": "symbol", "NAME OF COMPANY": "name"})
+        ind = get(INDUSTRY_LIST).rename(columns={"Symbol": "symbol", "Industry": "industry"})
+        df = eq[["symbol", "name"]].merge(ind[["symbol", "industry"]], on="symbol", how="left")
+        df["industry"] = df["industry"].fillna("Other")
+        df.to_csv(path, index=False)
+        log.info("universe refreshed: %d stocks", len(df))
+    except Exception as e:
+        log.warning("universe refresh failed, keeping previous list: %s", e)
+
+
 def universe() -> pd.DataFrame:
-    df = pd.read_csv(config.UNIVERSE_CSV)
-    df = df.rename(columns={"Company Name": "name", "Industry": "industry", "Symbol": "symbol"})
-    return df[["symbol", "name", "industry"]]
+    if not config.UNIVERSE_CSV.exists():
+        refresh_universe()
+    return pd.read_csv(config.UNIVERSE_CSV)
+
+
+def history_counts(con) -> dict[str, int]:
+    return dict(con.execute("SELECT symbol, COUNT(*) FROM prices GROUP BY symbol").fetchall())
 
 
 def yahoo(symbol: str) -> str:
@@ -138,10 +170,6 @@ def load_prices(con, symbols: list[str] | None = None) -> dict[str, pd.DataFrame
     df = pd.read_sql_query(q + " ORDER BY symbol, date", con, params=params)
     df["date"] = pd.to_datetime(df["date"])
     return {s: g.drop(columns="symbol").set_index("date") for s, g in df.groupby("symbol")}
-
-
-def has_history(con) -> bool:
-    return con.execute("SELECT COUNT(*) FROM prices").fetchone()[0] > 50_000
 
 
 def fundamentals(con, symbol: str, max_age_days: int = 7) -> dict:
