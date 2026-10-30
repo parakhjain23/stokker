@@ -1,0 +1,10 @@
+yfinance>=1.7
+jugaad-data
+pandas
+numpy
+feedparser
+google-genai
+apscheduler>=3.10,<4
+streamlit
+python-dotenv
+pytest
