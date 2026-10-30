@@ -146,9 +146,9 @@ def run_backtest(con, frames: dict[str, pd.DataFrame]) -> list[dict]:
     rows = []
     for s in SETUPS:
         st = summarize(backtest_setup(s, frames))
-        enabled = st["trades"] >= config.MIN_BACKTEST_TRADES and (st["avg_r"] or 0) > 0
+        enabled = st["trades"] >= config.MIN_BACKTEST_TRADES and (st["avg_r"] or 0) >= config.MIN_BACKTEST_AVG_R
         reason = None if enabled else ("too few backtest trades" if st["trades"] < config.MIN_BACKTEST_TRADES
-                                       else "negative backtest expectancy")
+                                       else f"backtest edge {st['avg_r']:+.3f}R below {config.MIN_BACKTEST_AVG_R}R")
         con.execute(
             """INSERT INTO setup_stats (setup, horizon, trades, hit_rate, avg_r, max_dd_r, enabled, disabled_reason, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?)

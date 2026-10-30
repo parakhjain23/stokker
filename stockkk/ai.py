@@ -85,8 +85,11 @@ def _generate(prompt: str, schema=None) -> str:
     for attempt in range(3):
         try:
             return client.models.generate_content(model=config.GEMINI_MODEL, contents=prompt, config=cfg).text
-        except Exception as e:  # rate limit or transient error
+        except Exception as e:
+            code = getattr(e, "code", None)
             log.warning("Gemini call failed (attempt %d): %s", attempt + 1, e)
+            if code and code != 429 and code < 500:  # bad model, key or request: retrying will not help
+                raise AIUnavailable(f"Gemini error {code}: {getattr(e, 'message', e)}") from e
             time.sleep(20 * (attempt + 1))
     raise AIUnavailable("Gemini did not respond after 3 attempts")
 

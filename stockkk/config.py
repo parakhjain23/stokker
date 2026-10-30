@@ -10,7 +10,7 @@ DB_PATH = os.getenv("DB_PATH", str(ROOT / "data" / "stockkk.db"))
 UNIVERSE_CSV = ROOT / "data" / "nifty500.csv"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 HORIZONS = ("intraday", "swing", "longterm")
 MIN_RR = {"intraday": 2.0, "swing": 2.0, "longterm": 1.5}
@@ -19,6 +19,7 @@ MAX_AI_ADJ = 15            # Gemini may move win probability by at most this man
 MAX_CANDIDATES = 15        # per horizon, sent to Gemini
 MAX_PICKS = 5              # per horizon, published
 MIN_BACKTEST_TRADES = 30
+MIN_BACKTEST_AVG_R = 0.05   # a setup needs a real backtested edge; Gemini cannot create one
 MIN_LIVE_TRADES = 30       # auto-disable check needs at least this many live calls
 MIN_LIVE_HIT_RATE = 0.35
 BLEND_AFTER = 20           # blend live stats into confidence after this many live calls

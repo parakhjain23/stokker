@@ -148,14 +148,18 @@ def run(con, prices: dict | None = None) -> dict:
     db.set_meta(con, "overview", json.dumps(overview, default=str))
     market = {"as_of": overview["as_of"], "indices": overview["indices"], "breadth": overview["breadth"],
               "top_sectors": overview["sectors"][:3], "bottom_sectors": overview["sectors"][-3:]}
-    cands = find_candidates(frames, uni, setups.enabled_stats(con), as_of)
+    stats = setups.enabled_stats(con)
+    cands = find_candidates(frames, uni, stats, as_of)
     summary = {}
     for h in config.HORIZONS:
         if con.execute("SELECT 1 FROM recommendations WHERE horizon=? AND data_as_of=?", (h, as_of_s)).fetchone():
             summary[h] = "already published"
             continue
         if not cands[h]:
-            publish(con, h, [], [], "No setup triggered on the latest data.", as_of_s)
+            has_setup = any(s.horizon == h and s.name in stats for s in setups.SETUPS)
+            reason = ("No setup triggered on the latest data." if has_setup else
+                      "No setup for this horizon currently shows a backtested edge, so nothing is recommended.")
+            publish(con, h, [], [], reason, as_of_s)
             summary[h] = "NO TRADE"
             continue
         top = enrich(con, h, cands[h])

@@ -51,3 +51,13 @@ def test_fallback_used_when_yahoo_empty(monkeypatch):
     data.fetch_prices(con, ["FOO"], "1mo")
     src = con.execute("SELECT DISTINCT source FROM prices WHERE symbol='FOO'").fetchone()[0]
     assert src.startswith("nse")
+
+
+def test_partial_bar_dropped_before_close():
+    from datetime import datetime
+    df = _df([100, 101])
+    today = df.index[-1]
+    before = datetime(today.year, today.month, today.day, 15, 0, tzinfo=data.IST)
+    after = datetime(today.year, today.month, today.day, 16, 30, tzinfo=data.IST)
+    assert len(data.drop_partial_bar(df, before)) == 1
+    assert len(data.drop_partial_bar(df, after)) == 2

@@ -15,6 +15,7 @@ from stockkk import config, db
 warnings.filterwarnings("ignore", module="yfinance")
 warnings.filterwarnings("ignore", module="jugaad_data")
 log = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 COLS = ["open", "high", "low", "close", "volume"]
 MAX_GAP = 0.21          # NSE circuit limits cap most daily moves at 20%
@@ -75,6 +76,14 @@ def _download(tickers: list[str], period: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def drop_partial_bar(df: pd.DataFrame, now_ist: datetime | None = None) -> pd.DataFrame:
+    """Before 16:00 IST today's bar is incomplete, so it is not stored."""
+    now_ist = now_ist or datetime.now(IST)
+    if now_ist.hour < 16:
+        return df[[d != now_ist.date() for d in df.index]]
+    return df
+
+
 def store(con, symbol: str, df: pd.DataFrame, source: str) -> None:
     fetched = db.now()
     con.executemany(
@@ -89,7 +98,8 @@ def set_status(con, symbol: str, ok: bool, reason: str | None) -> None:
 
 def fetch_prices(con, symbols: list[str], period: str, use_fallback: bool = True) -> dict:
     """Fetch and store daily bars. Returns {'ok': n, 'failed': [symbols]}."""
-    idx = _normalize_yf(_download(["^NSEI"], period))
+    raw_idx = _download(["^NSEI"], period)
+    idx = _normalize_yf(raw_idx["^NSEI"] if not raw_idx.empty else raw_idx)
     index_ret = pd.Series(idx["close"].pct_change().values, index=idx.index) if not idx.empty else None
     ok, failed = 0, []
     for i in range(0, len(symbols), 100):
@@ -106,6 +116,7 @@ def fetch_prices(con, symbols: list[str], period: str, use_fallback: bool = True
                     df, source = _fallback_nse(s, period), "nse (delayed)"
                 except Exception as e:
                     log.warning("NSE fallback failed for %s: %s", s, e)
+            df = drop_partial_bar(df)
             df, reason = clean(df, None if s.startswith("^") or "=" in s else index_ret)
             if df.empty:
                 failed.append(s)
