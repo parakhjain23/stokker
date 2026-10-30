@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from stockkk import db  # noqa: E402
+from stockkk import config, db  # noqa: E402
 
 st.set_page_config(page_title="Stockkk Research", page_icon="📈", layout="wide")
 DISCLAIMER = ("Research and paper trading only, not investment advice. Prices are free end-of-day data "
@@ -31,6 +31,17 @@ def latest_as_of():
     return df.iloc[0]["d"]
 
 
+def regime_banner():
+    raw, _ = meta("overview")
+    if not raw:
+        return
+    reg = json.loads(raw).get("regime")
+    if not reg:
+        return
+    (st.success if reg["risk_on"] else st.warning)(
+        f"**Market regime:** {reg['note']} Breadth {reg['breadth_pct']:.0f}% (20-day average {reg['breadth_20d_avg_pct']:.0f}%).")
+
+
 def card(r):
     with st.container(border=True):
         color = "green" if r.direction == "BUY" else "red"
@@ -38,13 +49,13 @@ def card(r):
         c = st.columns(4)
         c[0].metric("Entry", f"₹{r.entry:,.2f}", help="Stop order: only if price trades through" if r.trigger else "Near last close")
         c[1].metric("Stop-loss", f"₹{r.stop:,.2f}")
-        c[2].metric("Target", f"₹{r.target:,.2f}")
-        c[3].metric("Risk:Reward", f"1:{r.rr:g}")
+        c[2].metric("Target", f"₹{r.target:,.2f}" if pd.notna(r.target) else "rule / time exit")
+        c[3].metric("Risk:Reward", f"1:{r.rr:g}" if pd.notna(r.rr) else "open-ended")
         c = st.columns(4)
         c[0].metric("Hold", f"{r.hold_days} day{'s' if r.hold_days > 1 else ''}")
         c[1].metric("Win probability", f"{r.confidence:.0f}%", help="Chance the target is hit before the stop, from backtest + AI adjustment")
         c[2].metric("Expected", f"{r.expected_r:+.2f}R", help="Average result in multiples of risk, from backtest + AI adjustment")
-        st.caption(f"Delayed EOD data as of {r.data_as_of} · status {r.status}")
+        st.caption(f"Exit: {r.exit_note or 'fixed target and stop'} · Delayed EOD data as of {r.data_as_of} · status {r.status}")
         with st.expander("Why, and what would cancel it"):
             st.write(r.reasoning)
             st.markdown(f"**Technical:** {r.technical}\n\n**Fundamental:** {r.fundamental}\n\n**News:** {r.news}")
@@ -52,15 +63,18 @@ def card(r):
 
 
 def ranked_table(where: str, params: tuple, limit: int | None = None):
+    show_all = st.checkbox(f"Also show matches with win probability under {config.MIN_WIN_PROB:.0%}",
+                           value=False, key=f"all_{where}_{limit}")
     sql = ("SELECT rank AS Rank, symbol AS Symbol, name AS Company, horizon AS Horizon, direction AS Side, "
            "entry AS Entry, stop AS \"Stop-loss\", target AS Target, win_prob AS \"Win %\", "
-           "expected_r AS \"Expected R\", setup AS Pattern, "
-           "CASE setup_proven WHEN 1 THEN 'yes' ELSE 'no' END AS \"Proven pattern\", ai_verdict AS \"AI verdict\", "
+           "expected_r AS \"Expected R\", setup AS Strategy, exit_note AS Exit, "
+           "CASE setup_proven WHEN 1 THEN 'yes' ELSE 'no' END AS \"Proven\", ai_verdict AS \"AI verdict\", "
            "CASE recommended WHEN 1 THEN '✅' ELSE '' END AS Recommended, reasoning AS \"AI reason\" "
-           f"FROM candidates WHERE {where} ORDER BY win_prob DESC, expected_r DESC")
+           f"FROM candidates WHERE {where}" + ("" if show_all else f" AND win_prob >= {config.MIN_WIN_PROB * 100}")
+           + " ORDER BY win_prob DESC, expected_r DESC")
     df = q(sql + (f" LIMIT {limit}" if limit else ""), params)
     if df.empty:
-        st.write("No stocks matched any pattern.")
+        st.write("No stocks matched any pattern" + ("" if show_all else " with a high enough win probability") + ".")
         return
     if limit:  # overall list: re-number across horizons
         df["Rank"] = range(1, len(df) + 1)
@@ -68,7 +82,8 @@ def ranked_table(where: str, params: tuple, limit: int | None = None):
                  column_config={"Win %": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
                                 "AI reason": st.column_config.TextColumn(width="large")})
     st.caption("Rank 1 = highest win chance (backtest + AI adjustment). Only rows marked Recommended pass the "
-               "quality bar: proven pattern, AI verdict TAKE, enough risk-reward and expected return.")
+               "quality bar: proven strategy, AI verdict TAKE, win probability above the minimum, positive expected return. "
+               "Strategies ending in -old-str1 are the original patterns, kept for watching.")
 
 
 def horizon_page(h):
@@ -104,6 +119,7 @@ def horizon_page(h):
 
 def best():
     st.header("Today's best")
+    regime_banner()
     as_of = latest_as_of()
     df = q("SELECT * FROM recommendations WHERE data_as_of=? AND status!='NO_TRADE' ORDER BY expected_r DESC LIMIT 5", (as_of,))
     if df.empty:
@@ -134,6 +150,7 @@ def overview():
         st.write("No data yet. Run the worker.")
         return
     o = json.loads(raw)
+    regime_banner()
     st.caption(f"Delayed EOD data as of {o['as_of']} · computed {at[:16]} UTC")
     b = o["breadth"]
     st.write(f"Breadth (Nifty 500): **{b['advancers']}** advancers, **{b['decliners']}** decliners")
@@ -178,11 +195,17 @@ def performance():
         st.subheader("All closed calls")
         st.dataframe(closed[["closed_on", "horizon", "symbol", "direction", "entry", "exit_price", "status",
                              "result_r", "pnl_pct", "setup"]].round(2), hide_index=True, use_container_width=True)
-    st.subheader("Setups: backtest (3 years) and live")
-    stats = q("SELECT setup, horizon, trades, hit_rate, avg_r, max_dd_r, live_trades, live_hit_rate, live_avg_r, "
-              "enabled, disabled_reason, updated_at FROM setup_stats")
+    st.subheader("Strategies: 8-year backtest with a 2-year hold-out, and live results")
+    stats = q("SELECT setup AS Strategy, generation AS Generation, horizon AS Horizon, trades AS Trades, "
+              "hit_rate AS \"Win rate\", avg_r AS \"Avg R\", is_avg_r AS \"Avg R in-sample\", "
+              "oos_trades AS \"Hold-out trades\", oos_hit_rate AS \"Hold-out win rate\", oos_avg_r AS \"Hold-out avg R\", "
+              "max_dd_r AS \"Max drawdown R\", live_trades AS \"Live calls\", live_hit_rate AS \"Live win rate\", "
+              "live_avg_r AS \"Live avg R\", CASE enabled WHEN 1 THEN 'yes' ELSE 'no' END AS Active, "
+              "disabled_reason AS \"Why inactive\" FROM setup_stats ORDER BY enabled DESC, oos_avg_r DESC")
     st.dataframe(stats.round(3), hide_index=True, use_container_width=True)
-    st.caption("A setup is used only if its backtest shows a real edge, and is switched off if live results fall short. "
+    st.caption("A strategy is active only if it is profitable net of costs both in the first 6 years and in the last "
+               "2 years (which it was not tuned on), and it is switched off if live results fall short. "
+               "Trend strategies also stand aside when market breadth is weak. "
                "R = result as a multiple of the risk taken (entry to stop).")
 
 

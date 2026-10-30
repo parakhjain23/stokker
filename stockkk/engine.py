@@ -14,9 +14,35 @@ def liquid(d: pd.DataFrame) -> bool:
 
 
 def build_frames(prices: dict[str, pd.DataFrame], symbols) -> dict[str, pd.DataFrame]:
-    """Indicator frames for liquid stocks only (thinly traded stocks are hard to trade and easy to move).
+    """Indicator frames for liquid stocks, plus two cross-sectional columns every setup can use:
+    rs_rank (percentile of 3-month return vs Nifty across the universe) and breadth (share of stocks
+    above their 200-day EMA, the market regime gauge).
     ponytail: liquidity is judged on today's volume, also for the backtest; fine for a screen, not for research."""
-    return {s: indicators.add_all(prices[s]) for s in symbols if s in prices and liquid(prices[s])}
+    frames = {s: indicators.add_all(prices[s]) for s in symbols if s in prices and liquid(prices[s])}
+    if not frames:
+        return frames
+    nifty = prices.get("^NSEI")
+    nret = nifty["close"].pct_change(63) if nifty is not None else 0
+    rs = pd.DataFrame({s: d["ret63"] - (nret.reindex(d.index) if nifty is not None else 0) for s, d in frames.items()})
+    rs_rank = rs.rank(axis=1, pct=True)
+    above = pd.DataFrame({s: d["close"] > d["ema200"] for s, d in frames.items()})
+    breadth = above.sum(axis=1) / rs.notna().sum(axis=1).clip(lower=1)
+    breadth_sma = breadth.rolling(20).mean()
+    for s, d in frames.items():
+        d["rs_rank"] = rs_rank[s].reindex(d.index)
+        d["breadth"] = breadth.reindex(d.index)
+        d["breadth_sma"] = breadth_sma.reindex(d.index)
+    return frames
+
+
+def regime(frames: dict) -> dict:
+    d = next(iter(frames.values()))
+    b, b_sma = float(d["breadth"].iloc[-1]), float(d["breadth_sma"].iloc[-1])
+    on = b > config.BREADTH_MIN and b > b_sma
+    return {"risk_on": on, "breadth_pct": round(b * 100, 1), "breadth_20d_avg_pct": round(b_sma * 100, 1),
+            "note": ("RISK-ON: most stocks are in uptrends and breadth is improving; trend strategies active."
+                     if on else f"RISK-OFF: only {b:.0%} of stocks are above their 200-day average"
+                     f"{' and breadth is falling' if b <= b_sma else ''}. Trend strategies stand aside.")}
 
 
 def latest_date(frames: dict[str, pd.DataFrame]):
@@ -39,12 +65,13 @@ def market_overview(prices: dict, frames: dict, uni: pd.DataFrame) -> dict:
                      "chg_5d_pct": _pct(c.iloc[-1], c.iloc[-6]), "as_of": str(d.index[-1].date())}
     idx["GIFT Nifty"] = {"status": "unavailable (not in free data)"}
     as_of = latest_date(frames)
+    reg = regime(frames)
     last = pd.DataFrame([{"symbol": s, "ret1": d["ret1"].iloc[-1], "ret20": d["ret20"].iloc[-1]}
                          for s, d in frames.items() if d.index[-1] == as_of])
     last = last.merge(uni, on="symbol")
     sectors = (last.groupby("industry")[["ret1", "ret20"]].median() * 100).round(2)
     return {
-        "as_of": str(as_of.date()), "indices": idx,
+        "as_of": str(as_of.date()), "indices": idx, "regime": reg,
         "breadth": {"advancers": int((last["ret1"] > 0).sum()), "decliners": int((last["ret1"] < 0).sum())},
         "sectors": sectors.sort_values("ret20", ascending=False).reset_index().to_dict("records"),
     }
@@ -79,10 +106,11 @@ def find_candidates(frames: dict, uni: pd.DataFrame, stats: dict, as_of) -> dict
             lv = setup.levels(row)
             if not setups.valid_levels(lv):
                 continue
-            rr = round(abs(lv["target"] - lv["entry"]) / abs(lv["entry"] - lv["stop"]), 2)
+            rr = None if lv["target"] is None else round(abs(lv["target"] - lv["entry"]) / abs(lv["entry"] - lv["stop"]), 2)
             out[setup.horizon].append({
                 "symbol": sym, "name": info.at[sym, "name"], "industry": info.at[sym, "industry"],
                 "setup": setup.name, "setup_rule": setup.description, "setup_proven": bool(st["enabled"]),
+                "generation": setup.generation, "exit_note": setup.exit_note or "Fixed target and stop.",
                 **lv, "rr": rr,
                 "entry_type": "stop order: only if price trades through entry next session" if lv["trigger"]
                               else "near last close",
@@ -122,18 +150,18 @@ def score(c: dict, a) -> tuple[float, float]:
     """Final win probability (%) and expected R after the AI adjustment."""
     adj = a.confidence_adj if a else 0
     win = min(max(c["backtest_win_prob"] * 100 + adj, 0), 100)
-    return round(win, 1), round(c["backtest_avg_r"] + adj / 100 * (c["rr"] + 1), 2)
+    return round(win, 1), round(c["backtest_avg_r"] + adj / 100 * ((c["rr"] or 1.0) + 1), 2)
 
 
-def publish(con, horizon: str, cands: list[dict], assessed: dict, as_of: str) -> int:
+def publish(con, horizon: str, cands: list[dict], assessed: dict, as_of: str, regime_note: str = "") -> int:
     """Rank every candidate (1 = highest win chance) and store the list. Publish as tracked calls
     only those that clear the quality bar; if none do, publish NO TRADE (R11, R12)."""
     rows = []
     for c in cands:
         a = assessed.get(c["symbol"])
         win, exp_r = score(c, a)
-        ok = (c["setup_proven"] and a is not None and a.verdict == "TAKE"
-              and c["rr"] >= config.MIN_RR[horizon] and exp_r >= config.MIN_EXPECTED_R)
+        ok = (c["setup_proven"] and a is not None and a.verdict == "TAKE" and win >= config.MIN_WIN_PROB * 100
+              and (c["rr"] is None or c["rr"] >= config.MIN_RR[horizon]) and exp_r >= config.MIN_EXPECTED_R)
         rows.append((c, a, win, exp_r, ok))
     rows.sort(key=lambda x: (x[2], x[3]), reverse=True)
     n = 0
@@ -141,7 +169,7 @@ def publish(con, horizon: str, cands: list[dict], assessed: dict, as_of: str) ->
         common = {"created_at": db.now(), "horizon": horizon, "symbol": c["symbol"], "name": c["name"],
                   "direction": c["direction"], "entry": c["entry"], "stop": c["stop"], "target": c["target"],
                   "rr": c["rr"], "hold_days": c["hold_days"], "trigger": int(c["trigger"]), "setup": c["setup"],
-                  "reasoning": a.reasoning if a else "Not assessed by AI.",
+                  "exit_note": c["exit_note"], "reasoning": a.reasoning if a else "Not assessed by AI.",
                   "invalidation": a.invalidation if a else None, "data_as_of": as_of}
         _insert(con, "candidates", {**common, "rank": rank, "setup_proven": int(c["setup_proven"]),
                                     "win_prob": win, "expected_r": exp_r,
@@ -153,9 +181,10 @@ def publish(con, horizon: str, cands: list[dict], assessed: dict, as_of: str) ->
     con.commit()
     if n == 0:
         proven = any(c["setup_proven"] for c in cands)
-        no_trade(con, horizon, f"{len(cands)} stocks matched a pattern, but none cleared the quality bar."
-                 if proven else f"{len(cands)} stocks matched a pattern, but no pattern for this horizon has a "
-                 "proven backtested edge, so nothing is recommended. See the ranked list.", as_of)
+        no_trade(con, horizon, f"{len(cands)} stocks matched a pattern, but none cleared the quality bar "
+                 f"(proven strategy, AI verdict TAKE, win probability >= {config.MIN_WIN_PROB:.0%}, positive expected return)."
+                 if proven else f"{len(cands)} stocks matched a pattern, but only unproven strategies fired. "
+                 f"{regime_note} See the ranked list.", as_of)
     return n
 
 
@@ -169,7 +198,8 @@ def run(con, prices: dict | None = None) -> dict:
     as_of_s = str(as_of.date())
     overview = market_overview(prices, frames, uni)
     db.set_meta(con, "overview", json.dumps(overview, default=str))
-    market = {"as_of": overview["as_of"], "indices": overview["indices"], "breadth": overview["breadth"],
+    market = {"as_of": overview["as_of"], "regime": overview["regime"], "indices": overview["indices"],
+              "breadth": overview["breadth"],
               "top_sectors": overview["sectors"][:3], "bottom_sectors": overview["sectors"][-3:]}
     stats = {r["setup"]: dict(r) for r in con.execute("SELECT * FROM setup_stats")}
     cands = find_candidates(frames, uni, stats, as_of)
@@ -179,7 +209,9 @@ def run(con, prices: dict | None = None) -> dict:
             summary[h] = "already published"
             continue
         if not cands[h]:
-            no_trade(con, h, "No stock matched any pattern on the latest data.", as_of_s)
+            reg = overview["regime"]
+            no_trade(con, h, "No stock matched any pattern on the latest data." +
+                     ("" if reg["risk_on"] else f" {reg['note']}"), as_of_s)
             summary[h] = "NO TRADE (no matches)"
             continue
         top = enrich(con, h, cands[h])
@@ -194,7 +226,8 @@ def run(con, prices: dict | None = None) -> dict:
             summary[h] = "AI unavailable"
             continue  # nothing stored; next run retries
         db.set_meta(con, f"ai_status_{h}", "ok")
-        n = publish(con, h, top, assessed, as_of_s)
+        reg = overview["regime"]
+        n = publish(con, h, top, assessed, as_of_s, "" if reg["risk_on"] else reg["note"])
         summary[h] = f"{len(top)} ranked, {n} recommended"
     return summary
 
