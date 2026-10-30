@@ -39,15 +39,19 @@ def add_all(df: pd.DataFrame) -> pd.DataFrame:
     d["pivot"], d["r1"], d["s1"] = pivot, 2 * pivot - l, 2 * pivot - h
     rng = h - l
     d["nr7"] = rng == rng.rolling(7).min()
+    d["rsi2"] = rsi(c, 2)
+    d["sma5"] = c.rolling(5).mean()
     d["ret1"] = c.pct_change()
+    d["ret63"] = c.pct_change(63)
     d["ret20"] = c.pct_change(20)
     return d
 
 
 def snapshot(row: pd.Series) -> dict:
     """Latest indicator values for the AI prompt and the dashboard. NaN becomes None."""
-    keys = ["close", "ema20", "ema50", "ema200", "rsi", "macd", "macd_signal", "macd_hist", "atr",
-            "volume", "vol20", "support", "resistance", "high52", "low52", "pivot", "r1", "s1", "ret20"]
+    keys = ["close", "ema20", "ema50", "ema200", "rsi", "rsi2", "macd", "macd_signal", "macd_hist", "atr",
+            "volume", "vol20", "support", "resistance", "high52", "low52", "pivot", "r1", "s1", "ret20", "ret63",
+            "rs_rank", "breadth"]
     out = {k: (None if pd.isna(row.get(k)) else round(float(row[k]), 2)) for k in keys}
     out["vwap"] = None  # needs intraday data
     return out

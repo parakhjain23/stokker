@@ -13,7 +13,7 @@ def _a(sym, adj=0, verdict="TAKE"):
 def _cand(sym="TCS", rr=2.0, p=0.45, r=0.3, proven=True):
     return {"symbol": sym, "name": sym, "direction": "BUY", "entry": 100, "stop": 95, "target": 110, "rr": rr,
             "hold_days": 10, "trigger": False, "backtest_win_prob": p, "backtest_avg_r": r, "setup": "x",
-            "setup_proven": proven}
+            "setup_proven": proven, "exit_note": "Fixed target and stop."}
 
 
 def test_no_trade_when_threshold_fails():  # Covers AE2
@@ -39,13 +39,13 @@ def test_ranks_all_by_win_chance_and_publishes_passing():
 
 def test_low_rr_excluded():
     con = db.connect(":memory:")
-    assert engine.publish(con, "swing", [_cand(rr=1.8)], {"TCS": _a("TCS")}, "2026-10-30") == 0
+    assert engine.publish(con, "swing", [_cand(rr=0.3)], {"TCS": _a("TCS")}, "2026-10-30") == 0
 
 
 def test_unproven_only_says_why():
     con = db.connect(":memory:")
     engine.publish(con, "swing", [_cand(proven=False)], {"TCS": _a("TCS")}, "2026-10-30")
-    assert "no pattern" in con.execute("SELECT reasoning FROM recommendations").fetchone()[0]
+    assert "unproven strategies" in con.execute("SELECT reasoning FROM recommendations").fetchone()[0]
 
 
 @pytest.fixture

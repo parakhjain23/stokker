@@ -14,20 +14,21 @@ CREATE TABLE IF NOT EXISTS fundamentals (
 CREATE TABLE IF NOT EXISTS news (
   url TEXT PRIMARY KEY, symbol TEXT, title TEXT, source TEXT, published_at TEXT, fetched_at TEXT);
 CREATE TABLE IF NOT EXISTS setup_stats (
-  setup TEXT PRIMARY KEY, horizon TEXT, trades INTEGER, hit_rate REAL, avg_r REAL, max_dd_r REAL,
+  setup TEXT PRIMARY KEY, horizon TEXT, generation TEXT, trades INTEGER, hit_rate REAL, avg_r REAL, max_dd_r REAL,
+  is_avg_r REAL, oos_trades INTEGER, oos_hit_rate REAL, oos_avg_r REAL,
   live_trades INTEGER DEFAULT 0, live_hit_rate REAL, live_avg_r REAL,
   enabled INTEGER, disabled_reason TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS recommendations (
   id INTEGER PRIMARY KEY, created_at TEXT, horizon TEXT, symbol TEXT, name TEXT, direction TEXT,
   entry REAL, stop REAL, target REAL, rr REAL, hold_days INTEGER, trigger INTEGER,
   confidence REAL, expected_r REAL, setup TEXT, reasoning TEXT, technical TEXT, fundamental TEXT,
-  news TEXT, invalidation TEXT, data_as_of TEXT,
+  news TEXT, invalidation TEXT, exit_note TEXT, data_as_of TEXT,
   status TEXT DEFAULT 'OPEN', closed_on TEXT, exit_price REAL, result_r REAL);
 CREATE TABLE IF NOT EXISTS candidates (
   id INTEGER PRIMARY KEY, created_at TEXT, data_as_of TEXT, horizon TEXT, rank INTEGER, symbol TEXT, name TEXT,
   direction TEXT, entry REAL, stop REAL, target REAL, rr REAL, hold_days INTEGER, trigger INTEGER,
   setup TEXT, setup_proven INTEGER, win_prob REAL, expected_r REAL, ai_verdict TEXT, reasoning TEXT,
-  invalidation TEXT, recommended INTEGER);
+  invalidation TEXT, exit_note TEXT, recommended INTEGER);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, job TEXT, started_at TEXT, ok INTEGER, message TEXT);
 

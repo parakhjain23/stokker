@@ -23,18 +23,21 @@ Schedule:
 - 16:30 Mon–Fri: end-of-day scan, grading and recommendations.
 - 08:30 Mon–Fri: global cues and the market brief.
 - Hourly: news.
-- Sunday 10:00: backtest refresh.
+- Sunday 10:00: backtest and validation refresh (8 years, 2-year hold-out).
 
 ## How a recommendation is made
 
-1. Six coded setups are backtested on 3 years of data across all liquid NSE stocks.
+1. Eleven coded strategies are backtested on 8 years of data across all liquid NSE stocks, net of costs.
+   A strategy is active only if it is profitable both in the first 6 years and in the last 2 (the hold-out).
+   Trend strategies also stand aside when market breadth is weak (see `docs/research.md`).
+   Strategies named `-old-str1` are the original chart patterns, kept so they can be watched.
 2. Every stock matching any setup on the latest bar becomes a candidate. There is no limit.
 3. Fundamentals and news are attached. Gemini judges every candidate (TAKE or SKIP), explains it,
    and may move the win probability by ±15 points.
 4. All candidates are ranked, with 1 being the highest win chance.
 5. A candidate becomes a tracked call only if all of these hold:
-   - its setup has a proven backtested edge of at least +0.05R, where R is the risk from entry to stop;
-   - Gemini says TAKE;
+   - its strategy is active (proven in both backtest windows, not switched off by live results);
+   - Gemini says TAKE and the win probability is at least 40%;
    - risk-reward and expected result clear the thresholds in `stockkk/config.py`.
    Otherwise the horizon shows NO TRADE.
 6. Open calls are graded each evening against real prices. A setup that underperforms live is switched off.
