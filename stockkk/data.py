@@ -2,6 +2,7 @@
 
 Nothing here invents a value: bad or missing data is dropped and recorded in data_status.
 """
+import gc
 import logging
 import time
 import warnings
@@ -103,7 +104,7 @@ def _download(tickers: list[str], period: str) -> pd.DataFrame:
     for attempt in range(3):
         try:
             return yf.download(tickers, period=period, group_by="ticker", auto_adjust=False,
-                               progress=False, threads=True)
+                               progress=False, threads=False)  # ponytail: threads=True leaks ~5MB/chunk; host OOMs at 256MB
         except Exception as e:  # throttling or network
             log.warning("yfinance download failed (%s), retrying", e)
             time.sleep(5 * (attempt + 1))
@@ -136,8 +137,8 @@ def fetch_prices(con, symbols: list[str], period: str, use_fallback: bool = True
     idx = _normalize_yf(raw_idx["^NSEI"] if not raw_idx.empty else raw_idx)
     index_ret = pd.Series(idx["close"].pct_change().values, index=idx.index) if not idx.empty else None
     ok, failed = 0, []
-    for i in range(0, len(symbols), 100):
-        chunk = symbols[i:i + 100]
+    for i in range(0, len(symbols), 25):  # small chunks keep the fetch flat at ~150MB
+        chunk = symbols[i:i + 25]
         raw = _download([yahoo(s) for s in chunk], period)
         for s in chunk:
             try:
@@ -160,6 +161,8 @@ def fetch_prices(con, symbols: list[str], period: str, use_fallback: bool = True
             set_status(con, s, True, reason)
             ok += 1
         con.commit()
+        del raw
+        gc.collect()
     return {"ok": ok, "failed": failed}
 
 
