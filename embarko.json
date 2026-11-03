@@ -1,0 +1,10 @@
+{
+  "$schema": "https://embarko.ai/schema/embarko.json",
+  "appId": "cmvv1f9ck001ofmvpfqv6na5v",
+  "schedules": [
+    { "cron": "30 16 * * 1-5", "path": "/tasks/eod", "timezone": "Asia/Kolkata" },
+    { "cron": "30 8 * * 1-5", "path": "/tasks/premarket", "timezone": "Asia/Kolkata" },
+    { "cron": "5 * * * *", "path": "/tasks/news", "timezone": "Asia/Kolkata" },
+    { "cron": "0 10 * * 0", "path": "/tasks/backtest", "timezone": "Asia/Kolkata" }
+  ]
+}

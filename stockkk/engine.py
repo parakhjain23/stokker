@@ -2,6 +2,9 @@
 import json
 import logging
 
+from collections.abc import Mapping
+
+import numpy as np
 import pandas as pd
 
 from stockkk import ai, config, data, db, indicators, news, setups
@@ -13,26 +16,56 @@ def liquid(d: pd.DataFrame) -> bool:
     return len(d) >= 60 and (d["close"] * d["volume"]).tail(20).mean() >= config.MIN_TRADED_VALUE
 
 
-def build_frames(prices: dict[str, pd.DataFrame], symbols) -> dict[str, pd.DataFrame]:
-    """Indicator frames for liquid stocks, plus two cross-sectional columns every setup can use:
-    rs_rank (percentile of 3-month return vs Nifty across the universe) and breadth (share of stocks
-    above their 200-day EMA, the market regime gauge).
-    ponytail: liquidity is judged on today's volume, also for the backtest; fine for a screen, not for research."""
-    frames = {s: indicators.add_all(prices[s]) for s in symbols if s in prices and liquid(prices[s])}
-    if not frames:
-        return frames
-    nifty = prices.get("^NSEI")
-    nret = nifty["close"].pct_change(63) if nifty is not None else 0
-    rs = pd.DataFrame({s: d["ret63"] - (nret.reindex(d.index) if nifty is not None else 0) for s, d in frames.items()})
-    rs_rank = rs.rank(axis=1, pct=True)
-    above = pd.DataFrame({s: d["close"] > d["ema200"] for s, d in frames.items()})
-    breadth = above.sum(axis=1) / rs.notna().sum(axis=1).clip(lower=1)
-    breadth_sma = breadth.rolling(20).mean()
-    for s, d in frames.items():
-        d["rs_rank"] = rs_rank[s].reindex(d.index)
-        d["breadth"] = breadth.reindex(d.index)
-        d["breadth_sma"] = breadth_sma.reindex(d.index)
-    return frames
+class Frames(Mapping):
+    """symbol -> indicator frame for liquid stocks, built on access, plus two cross-sectional columns
+    every setup can use: rs_rank (percentile of 3-month return vs Nifty across the universe) and breadth
+    (share of stocks above their 200-day EMA, the market regime gauge).
+    ponytail: frames are recomputed on every iteration instead of held; ~1500 frames do not fit in 256MB.
+    Liquidity is judged on today's volume, also for the backtest; fine for a screen, not for research."""
+
+    def __init__(self, prices: Mapping[str, pd.DataFrame], symbols):
+        self.prices = prices
+        nifty = prices.get("^NSEI")
+        nret = nifty["close"].pct_change(63) if nifty is not None else None
+        symbols = [s for s in symbols if s in prices]
+        idx = pd.DatetimeIndex([])
+        for s in symbols:
+            idx = idx.union(prices[s].index)
+        rs, above, self.symbols = [], [], []
+        for s in symbols:
+            p = prices[s]
+            if not liquid(p):
+                continue
+            d = indicators.add_all(p)
+            r = d["ret63"] - (nret.reindex(d.index) if nret is not None else 0)
+            rs.append(r.reindex(idx).to_numpy(np.float32))
+            above.append((d["close"] > d["ema200"]).reindex(idx, fill_value=False).to_numpy(bool))
+            self.symbols.append(s)
+        rs = pd.DataFrame(np.column_stack(rs) if rs else np.empty((len(idx), 0), np.float32), index=idx, columns=self.symbols)
+        self.rs_rank = pd.concat([rs.iloc[i:i + 200].rank(axis=1, pct=True).astype(np.float32)
+                                  for i in range(0, len(rs), 200)]) if len(rs) else rs  # chunked: rank works in float64
+        n = rs.notna().sum(axis=1).clip(lower=1)
+        self.breadth = pd.Series(np.column_stack(above).sum(axis=1) if above else 0, index=idx) / n
+        self.breadth_sma = self.breadth.rolling(20).mean()
+
+    def __getitem__(self, s: str) -> pd.DataFrame:
+        if s not in self.rs_rank.columns:
+            raise KeyError(s)
+        d = indicators.add_all(self.prices[s])
+        d["rs_rank"] = self.rs_rank[s].reindex(d.index)
+        d["breadth"] = self.breadth.reindex(d.index)
+        d["breadth_sma"] = self.breadth_sma.reindex(d.index)
+        return d
+
+    def __iter__(self):
+        return iter(self.symbols)
+
+    def __len__(self):
+        return len(self.symbols)
+
+
+def build_frames(prices: Mapping[str, pd.DataFrame], symbols) -> Mapping[str, pd.DataFrame]:
+    return Frames(prices, symbols)
 
 
 def regime(frames: dict) -> dict:

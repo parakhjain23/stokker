@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 DB_PATH = os.getenv("DB_PATH", str(ROOT / "data" / "stockkk.db"))
-UNIVERSE_CSV = ROOT / "data" / "universe.csv"
+UNIVERSE_CSV = Path(os.getenv("DATA_DIR", ROOT / "data")) / "universe.csv"
 MIN_TRADED_VALUE = 1e7     # skip stocks trading under ₹1 crore a day (20-day average)
 AI_BATCH = 20              # candidates per Gemini call
 
