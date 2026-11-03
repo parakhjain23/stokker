@@ -47,6 +47,7 @@ def refresh_universe(max_age_days: int = 7) -> None:
         ind = get(INDUSTRY_LIST).rename(columns={"Symbol": "symbol", "Industry": "industry"})
         df = eq[["symbol", "name"]].merge(ind[["symbol", "industry"]], on="symbol", how="left")
         df["industry"] = df["industry"].fillna("Other")
+        path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(path, index=False)
         log.info("universe refreshed: %d stocks", len(df))
     except Exception as e:
