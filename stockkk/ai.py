@@ -74,7 +74,9 @@ def _client():
     if not config.GEMINI_API_KEY:
         raise AIUnavailable("GEMINI_API_KEY not set")
     from google import genai
-    return genai.Client(api_key=config.GEMINI_API_KEY)
+    from google.genai import types
+    return genai.Client(api_key=config.GEMINI_API_KEY,
+                        http_options=types.HttpOptions(timeout=120_000))  # ms; a stalled call raises instead of hanging the worker forever
 
 
 def _generate(prompt: str, schema=None) -> str:
