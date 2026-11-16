@@ -29,6 +29,8 @@ def test_diary_values_open_closed_and_unfilled():
     s = diary.summary(d.reset_index())
     assert (s["closed"], s["open"], s["accuracy"], s["target_hit"], s["stop_hit"]) == (2, 2, 50, 1, 1)
     assert s["booked"] == 1000 and round(s["running"], 6) == 1000 and s["invested"] == 40_000
+    assert (s["open_up"], s["open_down"], s["won"], s["lost"]) == (2, 0, 1, 1)
+    assert s["open_money"] == 20_000 and round(s["open_value"], 6) == 21_000 and s["lost_rs"] == -1000
     assert round(s["nifty"], 6) == 500 + 200 + 1000 + 1000 and round(s["beat"], 6) == 2000 - 2700
 
 

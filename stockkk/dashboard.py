@@ -256,6 +256,17 @@ def diary_page():
                 help="Closed trades that ended in profit ÷ all closed trades")
     c[4].metric("Target hit", m["target_hit"])
     c[5].metric("Stop-loss hit", m["stop_hit"])
+    rs = lambda v: f"₹{v:,.0f}"  # noqa: E731
+    dl = lambda v: GAIN(v).replace("−", "-")  # noqa: E731 - Streamlit colours a delta red only on a plain minus
+    c = st.columns(6)
+    c[0].metric("Total money put in", rs(m["invested"]), help=f"₹{per:,} for every trade that was entered, open or closed")
+    c[1].metric("In the market now", rs(m["open_money"]), help=f"₹{per:,} × {m['open']} open trades")
+    c[2].metric("Worth today", rs(m["open_value"]), delta=dl(m["running"]) if m["open"] else None,
+                help="What the open trades are worth at the latest closing price")
+    c[3].metric("Open trades in profit", m["open_up"], delta=dl(m["open_up_rs"]) if m["open_up"] else None)
+    c[4].metric("Open trades in loss", m["open_down"], delta=dl(m["open_down_rs"]) if m["open_down"] else None)
+    c[5].metric("Closed: won / lost", f"{m['won']} / {m['lost']}",
+                help=f"Won {GAIN(m['won_rs'])}, lost {GAIN(m['lost_rs'])}")
     c = st.columns(6)
     c[0].metric("Total profit / loss", GAIN(m["total"]), delta=f"{m['total'] / m['invested'] * 100:+.2f}%" if m["invested"] else None,
                 help=f"Booked + running, on ₹{m['invested']:,} of pretend money")
@@ -279,7 +290,7 @@ def diary_page():
     fmt = {"Entry": MONEY, "Stop-loss": MONEY, "Target": MONEY, "Price now": MONEY, "Exit price": MONEY,
            "Profit / loss %": "{:+.2f}%", "Profit / loss ₹": GAIN, PER100: GAIN, "Days held": "{:.0f}",
            "Days in trade": "{:.0f}", "To stop-loss": "{:.1f}%", "To target": "{:.1f}%", "Accuracy": PCT}
-    fmt |= {"Nifty 50 same days %": "{:+.2f}%", "Beat Nifty 50 by ₹": GAIN}
+    fmt |= {"Shares": "{:,.1f}", "Nifty 50 same days %": "{:+.2f}%", "Beat Nifty 50 by ₹": GAIN}
     signed = ["Profit / loss %", "Profit / loss ₹", PER100, "Nifty 50 same days %", "Beat Nifty 50 by ₹"]
 
     live = d[d.state.isin(["open", "waiting"])]
@@ -290,6 +301,7 @@ def diary_page():
         sign = live.direction.map({"BUY": 1, "SELL": -1})
         t = pd.DataFrame({"Suggested on": live.data_as_of, "Side": live.direction, "Symbol": live.symbol,
                           "Company": live["name"], "Horizon": live.horizon.map(LABEL), "Entry": live.entry,
+                          "Shares": per / live.entry,
                           "Price now": live.last_price, "Profit / loss %": live.pnl_pct, "Profit / loss ₹": live.pnl_rs,
                           "Nifty 50 same days %": live.nifty_pct, "Beat Nifty 50 by ₹": live.beat_rs,
                           "Stop-loss": live.stop, "To stop-loss": sign * (live.last_price / live.stop - 1) * 100,
@@ -331,7 +343,8 @@ def diary_page():
     if len(v) > 1000:  # the table shows the newest 1,000; the download has everything
         st.caption(f"Showing the newest 1,000 of {len(v):,}. Use the download for all of them.")
     t = pd.DataFrame({"Suggested on": v.data_as_of, "Side": v.direction, "Symbol": v.symbol, "Company": v["name"],
-                      "Horizon": v.horizon.map(LABEL), "Entry": v.entry, "Stop-loss": v.stop, "Target": v.target,
+                      "Horizon": v.horizon.map(LABEL), "Entry": v.entry, "Shares": per / v.entry,
+                      "Stop-loss": v.stop, "Target": v.target,
                       "Result": v.Result, "Closed on": v.closed_on, "Exit price": v.exit_price,
                       "Price now": v.last_price.where(v.state == "open"), "Days held": v.days,
                       "Profit / loss %": v.pnl_pct, "Profit / loss ₹": v.pnl_rs, PER100: v.per100,
