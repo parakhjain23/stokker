@@ -3,7 +3,9 @@ import logging
 import os
 import queue
 import secrets
+import socket
 import threading
+import time
 from pathlib import Path
 
 data_dir = os.environ.get("DATA_DIR")
@@ -19,18 +21,34 @@ from stockkk import worker  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 _orig_health = starlette_app.create_health_routes
 _queue: "queue.Queue[str]" = queue.Queue()
+_running: dict = {}  # job name -> start time while a job runs
+JOB_LIMIT = 90 * 60  # s; a full EOD takes ~60 min on this host
+
+socket.setdefaulttimeout(60)  # every socket call without its own timeout (feeds, NSE fallback) fails instead of hanging
 
 
 def _runner():  # ponytail: one job at a time; 256MB is not enough to run two scans together
     while True:
         job = _queue.get()
+        _running[job] = time.time()
         try:
             worker.JOBS[job]()
         except Exception:
             logging.exception("%s crashed", job)
+        _running.clear()
+
+
+def _watchdog():  # a thread cannot be killed; exit so the platform restarts the app and the queue is unblocked
+    while True:
+        time.sleep(60)
+        for job, started in list(_running.items()):
+            if time.time() - started > JOB_LIMIT:
+                logging.error("%s ran over %d min; restarting app", job, JOB_LIMIT // 60)
+                os._exit(1)
 
 
 threading.Thread(target=_runner, daemon=True).start()
+threading.Thread(target=_watchdog, daemon=True).start()
 
 
 def _health_routes(runtime, base_url):
