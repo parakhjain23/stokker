@@ -89,9 +89,10 @@ def cards(df):
         PER100: st.column_config.Column(help=PER100_HELP)})
     with st.expander("Why, and what would cancel each one"):
         for _, r in df.iterrows():
-            st.markdown(f"**{r.direction} {r.symbol}** — {r.reasoning}\n\n"
-                        f"*Technical:* {r.technical} · *Fundamental:* {r.fundamental} · *News:* {r.news}\n\n"
-                        f"*Cancel the trade if:* {r.invalidation}")
+            why = "\n".join(f"  - {p.strip()}" for p in str(r.reasoning).split(";") if p.strip())
+            st.markdown(f"**{r.direction} {r.symbol}**\n- **Why:**\n{why}\n- **Chart:** {r.technical}\n"
+                        f"- **Company:** {r.fundamental}\n- **News:** {r.news}\n"
+                        f"- **Cancel the trade if:** {r.invalidation}")
 
 
 def ranked_table(where: str, params: tuple, limit: int | None = None):
@@ -231,13 +232,19 @@ def diary_page():
     if recs.empty:
         st.info("Nothing here yet. Entries appear automatically after the daily run.")
         return
+    before = len(recs)
+    recs = diary.drop_repeats(recs).sort_values(["data_as_of", "id"], ascending=False)
+    if before > len(recs):
+        st.caption(f"{before - len(recs):,} repeat entries left out: the same stock matched again while its earlier "
+                   "entry was still open, so it is counted once.")
     live_rows = recs[recs.status == "OPEN"]
     prices = pd.DataFrame(columns=["symbol", "date", "close"])
     if len(live_rows):
         marks = ",".join("?" * live_rows.symbol.nunique())
         prices = q(f"SELECT symbol, date, close FROM prices WHERE symbol IN ({marks}) AND date>?",
                    (*live_rows.symbol.unique(), live_rows.data_as_of.min()))
-    d = diary.build(recs, prices)
+    nifty = q("SELECT date, close FROM prices WHERE symbol='^NSEI' AND date>=? ORDER BY date", (recs.data_as_of.min(),))
+    d = diary.build(recs, prices, nifty)
     m = diary.summary(d)
     pc = lambda v: "—" if v is None or pd.isna(v) else f"{v:+.2f}%"  # noqa: E731
     c = st.columns(6)
@@ -257,6 +264,13 @@ def diary_page():
     c[3].metric("Average winning trade", pc(m["avg_win"]))
     c[4].metric("Average losing trade", pc(m["avg_loss"]))
     c[5].metric("Best / worst trade", f"{pc(m['best'])} / {pc(m['worst'])}")
+    if m["invested"] and pd.notna(m["nifty"]):
+        c = st.columns(6)
+        c[0].metric("Same money in Nifty 50", GAIN(m["nifty"]), delta=f"{m['nifty'] / m['invested'] * 100:+.2f}%",
+                    help="If each ₹10,000 had simply been put in the Nifty 50 index for the same days instead")
+        c[1].metric("Beat Nifty 50 by", GAIN(m["beat"]), delta="ahead" if m["beat"] >= 0 else "-behind",
+                    help="Total profit / loss minus what the Nifty 50 made. Below zero = just buying the index was better")
+        c[2].metric("Trades that beat Nifty 50", f"{m['beat_share']:.0f}%")
     st.caption(f"Sold by time or exit rule: {m['other_exit']} · order never filled: {m['not_filled']} · "
                f"average days held: {'—' if m['avg_days'] is None else round(m['avg_days'], 1)}")
 
@@ -265,7 +279,8 @@ def diary_page():
     fmt = {"Entry": MONEY, "Stop-loss": MONEY, "Target": MONEY, "Price now": MONEY, "Exit price": MONEY,
            "Profit / loss %": "{:+.2f}%", "Profit / loss ₹": GAIN, PER100: GAIN, "Days held": "{:.0f}",
            "Days in trade": "{:.0f}", "To stop-loss": "{:.1f}%", "To target": "{:.1f}%", "Accuracy": PCT}
-    signed = ["Profit / loss %", "Profit / loss ₹", PER100]
+    fmt |= {"Nifty 50 same days %": "{:+.2f}%", "Beat Nifty 50 by ₹": GAIN}
+    signed = ["Profit / loss %", "Profit / loss ₹", PER100, "Nifty 50 same days %", "Beat Nifty 50 by ₹"]
 
     live = d[d.state.isin(["open", "waiting"])]
     st.subheader(f"Open trades ({len(live)})")
@@ -276,6 +291,7 @@ def diary_page():
         t = pd.DataFrame({"Suggested on": live.data_as_of, "Side": live.direction, "Symbol": live.symbol,
                           "Company": live["name"], "Horizon": live.horizon.map(LABEL), "Entry": live.entry,
                           "Price now": live.last_price, "Profit / loss %": live.pnl_pct, "Profit / loss ₹": live.pnl_rs,
+                          "Nifty 50 same days %": live.nifty_pct, "Beat Nifty 50 by ₹": live.beat_rs,
                           "Stop-loss": live.stop, "To stop-loss": sign * (live.last_price / live.stop - 1) * 100,
                           "Target": live.target, "To target": sign * (live.target / live.last_price - 1) * 100,
                           "Days in trade": live.days, "Hold days": live.hold_days, "Result": live.Result,
@@ -289,7 +305,9 @@ def diary_page():
     done = d[d.state == "closed"].sort_values("closed_on")
     if len(done):
         st.subheader("Money over time")
-        st.line_chart(done.groupby("closed_on").pnl_rs.sum().cumsum().rename("Booked profit / loss (₹)"))
+        by_day = done.groupby("closed_on")[["pnl_rs", "nifty_rs"]].sum().cumsum()
+        st.line_chart(by_day.rename(columns={"pnl_rs": "Diary: booked profit / loss (₹)",
+                                             "nifty_rs": "Same money in Nifty 50 (₹)"}))
         st.subheader("Where the results come from")
         band = (done.confidence < config.MIN_WIN_PROB * 100).map(
             {True: f"Under {config.MIN_WIN_PROB:.0%}", False: f"{config.MIN_WIN_PROB:.0%} and above"})
@@ -302,7 +320,8 @@ def diary_page():
                 **{"Closed trades": ("id", "count"), "Accuracy": ("pnl_pct", lambda x: (x > 0).mean() * 100),
                    "Target hit": ("status", lambda x: (x == "TARGET_HIT").sum()),
                    "Stop-loss hit": ("status", lambda x: (x == "SL_HIT").sum()),
-                   "Profit / loss ₹": ("pnl_rs", "sum"), "Profit / loss %": ("pnl_pct", "mean")})
+                   "Profit / loss ₹": ("pnl_rs", "sum"), "Profit / loss %": ("pnl_pct", "mean"),
+                   "Beat Nifty 50 by ₹": ("beat_rs", "sum")})
             st.dataframe(color(g, signed, fmt), use_container_width=True,
                          column_config={"Profit / loss %": st.column_config.Column(help="Average per trade")})
 
@@ -316,6 +335,7 @@ def diary_page():
                       "Result": v.Result, "Closed on": v.closed_on, "Exit price": v.exit_price,
                       "Price now": v.last_price.where(v.state == "open"), "Days held": v.days,
                       "Profit / loss %": v.pnl_pct, "Profit / loss ₹": v.pnl_rs, PER100: v.per100,
+                      "Nifty 50 same days %": v.nifty_pct, "Beat Nifty 50 by ₹": v.beat_rs,
                       "Chance to win (at suggestion)": v.confidence, "Strategy": v.setup})
     st.dataframe(color(t.head(1000), signed, {**fmt, "Chance to win (at suggestion)": PCT}), hide_index=True,
                  use_container_width=True, column_config={PER100: st.column_config.Column(help=PER100_HELP)})

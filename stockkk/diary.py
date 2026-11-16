@@ -6,8 +6,22 @@ from stockkk import config
 DONE = ("TARGET_HIT", "SL_HIT", "EXPIRED", "EXIT_RULE")
 
 
-def build(recs: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+def drop_repeats(recs: pd.DataFrame) -> pd.DataFrame:
+    """Keep one entry per stock and horizon at a time: a row is a repeat if an earlier kept entry for the
+    same stock was still open on the day it was suggested. Counting it would count the same bet twice."""
+    busy, keep = {}, []
+    for r in recs.sort_values(["data_as_of", "id"]).itertuples():
+        key = (r.symbol, r.horizon)
+        if r.data_as_of >= busy.get(key, ""):
+            keep.append(r.Index)
+            busy[key] = r.closed_on if isinstance(r.closed_on, str) else "9999"
+    return recs.loc[recs.index.isin(keep)]
+
+
+def build(recs: pd.DataFrame, prices: pd.DataFrame, nifty: pd.DataFrame | None = None) -> pd.DataFrame:
     """recs: recommendations rows (no NO_TRADE). prices: symbol, date, close for those symbols.
+    nifty: date, close of the Nifty 50; adds nifty_pct / nifty_rs (same money in the index over the same
+    days) and beat_rs (trade minus index).
     Adds: state (open / closed / not filled / waiting), last_price, days, pnl_pct, pnl_rs, per100, won.
     Closed trades use the graded result (after costs); open trades are valued at the latest close.
     ponytail: every trade gets the same pretend amount, fractional shares; add real position sizing if needed."""
@@ -32,6 +46,20 @@ def build(recs: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
     out["per100"] = out.pnl_pct / risk_pct * 100
     out["days"] = (pd.to_datetime(out.closed_on) - pd.to_datetime(out.data_as_of)).dt.days.where(closed, n_bars)
     out["won"] = (out.pnl_pct > 0).where(out.state.isin(["closed", "open"]))
+    if nifty is not None and len(nifty):
+        idx = nifty.sort_values("date").set_index("date").close
+
+        def at(dates):  # Nifty close on that day, or the last one before it
+            pos = idx.index.searchsorted(dates.to_numpy(), side="right") - 1
+            return pd.Series(idx.to_numpy()[pos.clip(0)], index=dates.index).where(pos >= 0)
+
+        end = out.closed_on.where(closed, idx.index[-1]).astype(str)
+        out["nifty_pct"] = (at(end) / at(out.data_as_of) - 1) * 100
+        out.loc[~out.state.isin(["closed", "open"]), "nifty_pct"] = 0.0
+    else:
+        out["nifty_pct"] = float("nan")
+    out["nifty_rs"] = out.nifty_pct / 100 * config.PAPER_PER_TRADE
+    out["beat_rs"] = out.pnl_rs - out.nifty_rs
     return out
 
 
@@ -46,6 +74,8 @@ def summary(d: pd.DataFrame) -> dict:
             "other_exit": int(c.status.isin(["EXPIRED", "EXIT_RULE"]).sum()),
             "booked": c.pnl_rs.sum(), "running": o.pnl_rs.sum(), "total": c.pnl_rs.sum() + o.pnl_rs.sum(),
             "invested": (n + len(o)) * config.PAPER_PER_TRADE,
+            "nifty": c.nifty_rs.sum() + o.nifty_rs.sum(), "beat": c.beat_rs.sum() + o.beat_rs.sum(),
+            "beat_share": (pd.concat([c, o]).beat_rs > 0).mean() * 100 if n + len(o) else None,
             "avg_win": wins.pnl_pct.mean() if len(wins) else None,
             "avg_loss": losses.pnl_pct.mean() if len(losses) else None,
             "best": c.pnl_pct.max() if n else None, "worst": c.pnl_pct.min() if n else None,

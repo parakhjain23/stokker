@@ -37,7 +37,13 @@ RULES = """You are a cautious equity research analyst for the Indian stock marke
 Hard rules:
 - Use ONLY the numbers and facts in the input. Never invent prices, news, results or fundamentals.
 - If a field is null, say it is unavailable. Data is delayed end-of-day.
-- Never promise profits. Be specific and plain.
+- Never promise profits.
+Writing style, for every text you return:
+- Short points, not paragraphs. Simple everyday words a beginner understands.
+- Every point states one fact with its number from the input. No number or fact, no point.
+- No filler, no hype, no hedging: never write "it seems", "could potentially", "robust", "noteworthy",
+  "it is important to note", or repeat the question. Do not pad to sound thorough.
+- If you have nothing real to say for a field, write "Nothing notable".
 - Prefer NO TRADE over a weak or uncertain setup. Reject candidates with conflicting news,
   weak fundamentals (for long-term), overextended moves, or a hostile market backdrop.
 """
@@ -52,18 +58,20 @@ Assess EVERY candidate, one entry per symbol:
 - verdict: "TAKE" only for a strong, clean setup you would act on; otherwise "SKIP".
 - confidence_adj: integer from -{max_adj} to {max_adj}, your adjustment to the backtested win probability
   (in percentage points) from news, fundamentals and market context.
-- reasoning: 1-3 sentences on why take or skip, now.
-- technical / fundamental / news: one sentence each, citing the input numbers.
-- invalidation: concrete conditions that cancel the idea (price levels, events).
+- reasoning: the 2-3 strongest reasons to take or skip, as points joined by "; ". Max 10 words per point.
+- technical / fundamental / news: one point each, max 15 words, citing the input numbers.
+- invalidation: 1-2 concrete conditions that cancel the idea (a price level or an event), joined by "; ".
 
 Candidates (JSON):
 {candidates}
 """
 
 BRIEF_PROMPT = RULES + """
-Write a short market brief (5-7 bullet points) for an Indian trader for the next session:
-trend of Nifty and Bank Nifty, sector leaders and laggards, global cues, notable news, key risks.
-Mention the as-of date of the data. Plain text bullets starting with "- ".
+Write a market brief for an Indian trader for the next session. Exactly these bullets, in this order,
+each ONE line of at most 18 words, starting with "- **Label:**":
+Data date, Nifty 50, Bank Nifty, Market mood, Strong sectors, Weak sectors, World markets, News, Risks, What to do.
+Give the number with every claim. "News" and "Risks": the 1-2 that matter most, nothing else.
+"What to do": one plain instruction (for example: wait, or trade small).
 
 Market data (JSON): {overview}
 Headlines: {headlines}

@@ -89,6 +89,19 @@ def test_full_run_then_grading(world, monkeypatch):
     assert con.execute("SELECT recommended, status FROM candidates WHERE symbol='BBB'").fetchone()[:] == (0, "SL_HIT")
 
 
+def test_open_stock_is_not_suggested_twice(world, monkeypatch):
+    con, prices = world
+    monkeypatch.setattr(ai, "assess", lambda h, c, m: {"AAA": _a("AAA"), "BBB": _a("BBB")})
+    engine.run(con, prices)
+    for s in ("AAA", "BBB"):  # one more quiet day: both still open, both match again
+        nxt = prices[s].index[-1] + pd.offsets.BDay()
+        prices[s] = pd.concat([prices[s], prices[s].iloc[[-1]].set_axis([nxt])])
+    engine.run(con, prices)
+    assert con.execute("SELECT COUNT(*) FROM recommendations WHERE status='OPEN'").fetchone()[0] == 2
+    assert "already open" in con.execute("SELECT reasoning FROM recommendations WHERE status='NO_TRADE' "
+                                         "AND horizon='swing'").fetchone()[0]
+
+
 def test_ai_unavailable_publishes_nothing(world, monkeypatch):
     con, prices = world
     monkeypatch.setattr(ai, "assess", lambda h, c, m: (_ for _ in ()).throw(ai.AIUnavailable("timeout")))

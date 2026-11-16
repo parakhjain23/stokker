@@ -197,7 +197,8 @@ def publish(con, horizon: str, cands: list[dict], assessed: dict, as_of: str, re
               and (c["rr"] is None or c["rr"] >= config.MIN_RR[horizon]) and exp_r >= config.MIN_EXPECTED_R)
         rows.append((c, a, win, exp_r, ok))
     rows.sort(key=lambda x: (x[2], x[3]), reverse=True)
-    n = 0
+    held = {r[0] for r in con.execute("SELECT symbol FROM recommendations WHERE horizon=? AND status='OPEN'", (horizon,))}
+    n = repeats = 0
     for rank, (c, a, win, exp_r, ok) in enumerate(rows, 1):
         common = {"created_at": db.now(), "horizon": horizon, "symbol": c["symbol"], "name": c["name"],
                   "direction": c["direction"], "entry": c["entry"], "stop": c["stop"], "target": c["target"],
@@ -207,12 +208,17 @@ def publish(con, horizon: str, cands: list[dict], assessed: dict, as_of: str, re
         _insert(con, "candidates", {**common, "rank": rank, "setup_proven": int(c["setup_proven"]),
                                     "win_prob": win, "expected_r": exp_r,
                                     "ai_verdict": a.verdict if a else "NOT ASSESSED", "recommended": int(ok)})
-        if ok:
+        if ok and c["symbol"] in held:
+            repeats += 1  # already an open trade in the diary; a second entry would count the same bet twice
+        elif ok:
             _insert(con, "recommendations", {**common, "confidence": win, "expected_r": exp_r,
                                              "technical": a.technical, "fundamental": a.fundamental, "news": a.news})
             n += 1
     con.commit()
-    if n == 0:
+    if n == 0 and repeats:
+        no_trade(con, horizon, f"{repeats} stock(s) passed every test again today, but they are already open trades "
+                 "in the diary, so nothing new is added. See 'Still open from earlier'.", as_of)
+    elif n == 0:
         proven = any(c["setup_proven"] for c in cands)
         no_trade(con, horizon, f"{len(cands)} stocks matched a pattern, but none cleared the quality bar "
                  f"(proven strategy, AI verdict TAKE, win probability >= {config.MIN_WIN_PROB:.0%}, positive expected return)."
