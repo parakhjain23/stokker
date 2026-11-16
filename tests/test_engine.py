@@ -82,6 +82,11 @@ def test_full_run_then_grading(world, monkeypatch):
         {"open": c, "high": c + 1, "low": c - 1, "close": c, "volume": 1e6}, index=more)])
     assert setups.grade_open(con, prices) == 1
     assert con.execute("SELECT status FROM recommendations WHERE symbol='AAA'").fetchone()[0] == "TARGET_HIT"
+    # the match the AI skipped is not a recommendation, but its outcome is still followed
+    prices["BBB"] = pd.concat([prices["BBB"], pd.DataFrame(
+        {"open": c - 100, "high": c - 99, "low": c - 101, "close": c - 100, "volume": 1e6}, index=more)])
+    setups.grade_open(con, prices)
+    assert con.execute("SELECT recommended, status FROM candidates WHERE symbol='BBB'").fetchone()[:] == (0, "SL_HIT")
 
 
 def test_ai_unavailable_publishes_nothing(world, monkeypatch):

@@ -259,25 +259,31 @@ def run_backtest(con, frames: dict[str, pd.DataFrame]) -> list[dict]:
 def grade_open(con, prices: dict[str, pd.DataFrame]) -> int:
     """Close OPEN recommendations whose stop, target, exit rule, trigger window or hold period is resolved."""
     from stockkk import indicators
-    n = 0
     by_name = {s.name: s for s in SETUPS}
-    for rec in con.execute("SELECT * FROM recommendations WHERE status='OPEN'").fetchall():
-        d = prices.get(rec["symbol"])
-        setup = by_name.get(rec["setup"])
-        if d is None or setup is None:
-            continue
-        frame = indicators.add_all(d)
-        after = frame[frame.index > pd.Timestamp(rec["data_as_of"])]
-        ex = setup.exit_rule(after).fillna(False).to_numpy() if setup.exit_rule else None
-        res = walk(*_arrays(after), rec["direction"], rec["entry"], rec["stop"], rec["target"],
-                   rec["hold_days"], bool(rec["trigger"]), exit_rule=ex, cost_pct=setup.cost_pct)
-        if res:
-            status, end, price, r = res
-            con.execute("UPDATE recommendations SET status=?, closed_on=?, exit_price=?, result_r=? WHERE id=?",
-                        (status, str(pd.Timestamp(end).date()), price, r, rec["id"]))
-            n += 1
-    con.commit()
-    return n
+    done = {}
+    # the matches that were not recommended are graded the same way, for the diary's comparison view
+    for table, where in (("recommendations", "status='OPEN'"), ("candidates", "status='OPEN' AND recommended=0")):
+        rows = con.execute(f"SELECT * FROM {table} WHERE {where} ORDER BY symbol").fetchall()
+        n, sym, frame = 0, None, None
+        for rec in rows:
+            setup = by_name.get(rec["setup"])
+            if rec["symbol"] != sym:  # one indicator frame per symbol, not per row
+                sym, d = rec["symbol"], prices.get(rec["symbol"])
+                frame = None if d is None else indicators.add_all(d)
+            if frame is None or setup is None:
+                continue
+            after = frame[frame.index > pd.Timestamp(rec["data_as_of"])]
+            ex = setup.exit_rule(after).fillna(False).to_numpy() if setup.exit_rule else None
+            res = walk(*_arrays(after), rec["direction"], rec["entry"], rec["stop"], rec["target"],
+                       rec["hold_days"], bool(rec["trigger"]), exit_rule=ex, cost_pct=setup.cost_pct)
+            if res:
+                status, end, price, r = res
+                con.execute(f"UPDATE {table} SET status=?, closed_on=?, exit_price=?, result_r=? WHERE id=?",
+                            (status, str(pd.Timestamp(end).date()), price, r, rec["id"]))
+                n += 1
+        con.commit()
+        done[table] = n
+    return done["recommendations"]
 
 
 CLOSED = "('TARGET_HIT','SL_HIT','EXPIRED','EXIT_RULE')"

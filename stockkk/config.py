@@ -22,6 +22,7 @@ MAX_AI_ADJ = 15            # Gemini may move win probability by at most this man
 MIN_BACKTEST_TRADES = 200   # in-sample
 MIN_OOS_TRADES = 100        # out-of-sample (last 2 years)
 MIN_WIN_PROB = 0.40         # hide and never recommend matches below this win probability
+PAPER_PER_TRADE = 10_000    # pretend rupees put into every diary trade
 MIN_BACKTEST_AVG_R = 0.02   # net of costs, required in BOTH the in-sample and the out-of-sample window
 OOS_YEARS = 2               # hold-out window at the end of the backtest
 MIN_LIVE_TRADES = 30       # auto-disable check needs at least this many live calls

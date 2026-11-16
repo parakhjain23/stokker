@@ -47,6 +47,10 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")  # dashboard reads while the worker writes
     con.executescript(SCHEMA)
+    have = {r[1] for r in con.execute("PRAGMA table_info(candidates)")}
+    for col in ("status TEXT DEFAULT 'OPEN'", "closed_on TEXT", "exit_price REAL", "result_r REAL"):
+        if col.split()[0] not in have:  # outcome of every match, so the diary can also follow the ones not recommended
+            con.execute(f"ALTER TABLE candidates ADD COLUMN {col}")
     return con
 
 

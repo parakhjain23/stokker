@@ -7,14 +7,15 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from stockkk import config, db  # noqa: E402
+from stockkk import config, db, diary  # noqa: E402
 
 st.set_page_config(page_title="Stockkk Research", page_icon="📈", layout="wide")
 LABEL = {"intraday": "Intraday plan", "swing": "Swing", "longterm": "Long-term"}
 GREEN, RED, AMBER = "color:#22c55e;font-weight:600", "color:#ef4444;font-weight:600", "color:#f59e0b;font-weight:600"
-STATUS = {"TARGET_HIT": "Target hit", "SL_HIT": "Stop-loss hit", "EXPIRED": "Time up, sold", "OPEN": "Open"}
+STATUS = {"TARGET_HIT": "Target hit", "SL_HIT": "Stop-loss hit", "EXPIRED": "Time up, sold",
+          "EXIT_RULE": "Exit rule, sold", "NOT_TRIGGERED": "Order not filled", "OPEN": "Open"}
 WORDS = {"BUY": GREEN, "TAKE": GREEN, "Target hit": GREEN, "Open": GREEN, "yes": GREEN, "ok": GREEN,
-         "SELL": RED, "SKIP": RED, "Stop-loss hit": RED, "no": RED, "Time up, sold": AMBER}
+         "SELL": RED, "SKIP": RED, "Stop-loss hit": RED, "no": RED, "Time up, sold": AMBER, "Exit rule, sold": AMBER}
 PER100 = "Profit per ₹100 risked"
 MONEY, PCT = "₹{:,.2f}", "{:.0f}%"
 
@@ -206,34 +207,123 @@ def news_page():
                     unsafe_allow_html=True)
 
 
-def performance():
-    st.header("Performance (paper trading)")
-    closed = q("SELECT * FROM recommendations WHERE status IN ('TARGET_HIT','SL_HIT','EXPIRED') ORDER BY closed_on")
-    if closed.empty:
-        st.info("No closed recommendations yet. Results appear here as targets, stops or hold periods are reached.")
+def diary_page():
+    st.header("Trade diary (paper trading)")
+    per = config.PAPER_PER_TRADE
+    st.caption(f"Every stock the app suggests is written here on the day it is suggested, with a pretend ₹{per:,} "
+               "put into each one. Nothing is ever edited or deleted afterwards. Open trades are valued at the latest "
+               "closing price; closed trades at their real exit, after costs.")
+    recs = q("SELECT * FROM recommendations WHERE status!='NO_TRADE' ORDER BY data_as_of DESC, id DESC")
+    rejected = q("SELECT *, win_prob AS confidence FROM candidates WHERE recommended=0 ORDER BY data_as_of DESC, id DESC")
+    counts = recs.horizon.value_counts()
+    views = {f"All ({len(recs)})": None, **{f"{LABEL[h]} ({counts.get(h, 0)})": h for h in LABEL},
+             f"Not recommended ({len(rejected)})": "rejected"}
+    view = views[st.radio("Show diary for", list(views), horizontal=True, key="diary_view")]
+    if view == "rejected":
+        recs = rejected
+        st.warning("These are matches the app did NOT recommend (unproven strategy, AI said SKIP, or a low chance to win). "
+                   "They are followed only to check that rejecting them was right. They never count in the real diary.")
+        split = st.radio("Horizon", ["All", *LABEL.values()], horizontal=True, key="diary_rejected_horizon")
+        if split != "All":
+            recs = recs[recs.horizon.map(LABEL) == split]
+    elif view:
+        recs = recs[recs.horizon == view]
+    if recs.empty:
+        st.info("Nothing here yet. Entries appear automatically after the daily run.")
+        return
+    live_rows = recs[recs.status == "OPEN"]
+    prices = pd.DataFrame(columns=["symbol", "date", "close"])
+    if len(live_rows):
+        marks = ",".join("?" * live_rows.symbol.nunique())
+        prices = q(f"SELECT symbol, date, close FROM prices WHERE symbol IN ({marks}) AND date>?",
+                   (*live_rows.symbol.unique(), live_rows.data_as_of.min()))
+    d = diary.build(recs, prices)
+    m = diary.summary(d)
+    pc = lambda v: "—" if v is None or pd.isna(v) else f"{v:+.2f}%"  # noqa: E731
+    c = st.columns(6)
+    c[0].metric("Matches followed" if view == "rejected" else "Stocks suggested", m["calls"],
+                help="Every entry since the app started")
+    c[1].metric("Open now", m["open"] + m["waiting"], help="Still running, or waiting for the next session to enter")
+    c[2].metric("Closed", m["closed"])
+    c[3].metric("Accuracy", "—" if m["accuracy"] is None else f"{m['accuracy']:.0f}%",
+                help="Closed trades that ended in profit ÷ all closed trades")
+    c[4].metric("Target hit", m["target_hit"])
+    c[5].metric("Stop-loss hit", m["stop_hit"])
+    c = st.columns(6)
+    c[0].metric("Total profit / loss", GAIN(m["total"]), delta=f"{m['total'] / m['invested'] * 100:+.2f}%" if m["invested"] else None,
+                help=f"Booked + running, on ₹{m['invested']:,} of pretend money")
+    c[1].metric("Booked (closed trades)", GAIN(m["booked"]))
+    c[2].metric("Running (open trades)", GAIN(m["running"]))
+    c[3].metric("Average winning trade", pc(m["avg_win"]))
+    c[4].metric("Average losing trade", pc(m["avg_loss"]))
+    c[5].metric("Best / worst trade", f"{pc(m['best'])} / {pc(m['worst'])}")
+    st.caption(f"Sold by time or exit rule: {m['other_exit']} · order never filled: {m['not_filled']} · "
+               f"average days held: {'—' if m['avg_days'] is None else round(m['avg_days'], 1)}")
+
+    names = {"open": "Open", "waiting": "Enters next session", "not filled": "Order not filled"}
+    d["Result"] = d.state.map(names).where(d.state != "closed", d.status.map(STATUS))
+    fmt = {"Entry": MONEY, "Stop-loss": MONEY, "Target": MONEY, "Price now": MONEY, "Exit price": MONEY,
+           "Profit / loss %": "{:+.2f}%", "Profit / loss ₹": GAIN, PER100: GAIN, "Days held": "{:.0f}",
+           "Days in trade": "{:.0f}", "To stop-loss": "{:.1f}%", "To target": "{:.1f}%", "Accuracy": PCT}
+    signed = ["Profit / loss %", "Profit / loss ₹", PER100]
+
+    live = d[d.state.isin(["open", "waiting"])]
+    st.subheader(f"Open trades ({len(live)})")
+    if live.empty:
+        st.write("No open trades right now.")
     else:
-        closed["pnl_pct"] = (closed.exit_price / closed.entry - 1) * 100 * closed.direction.map({"BUY": 1, "SELL": -1})
-        c = st.columns(4)
-        c[0].metric("Closed calls", len(closed))
-        c[1].metric("Win rate", f"{(closed.status == 'TARGET_HIT').mean():.0%}")
-        c[2].metric(PER100, GAIN(closed.result_r.mean() * 100), help=PER100_HELP)
-        c[3].metric("Average profit / loss per trade", f"{closed.pnl_pct.mean():+.2f}%")
-        st.line_chart((closed.set_index("closed_on")["result_r"] * 100).cumsum()
-                      .rename("Total profit, risking ₹100 per trade (₹)"))
-        g = closed.groupby(closed.horizon.map(LABEL).rename("Horizon")).agg(
-            **{"Closed calls": ("id", "count"), "Win rate": ("status", lambda s: (s == "TARGET_HIT").mean() * 100),
-               PER100: ("result_r", lambda s: s.mean() * 100), "Avg profit / loss %": ("pnl_pct", "mean")})
-        st.dataframe(color(g, [PER100, "Avg profit / loss %"], {"Win rate": PCT, PER100: GAIN,
-                                                                 "Avg profit / loss %": "{:+.2f}%"}),
-                     use_container_width=True)
-        st.subheader("All closed calls")
-        t = pd.DataFrame({"Closed on": closed.closed_on, "Horizon": closed.horizon.map(LABEL), "Symbol": closed.symbol,
-                          "Side": closed.direction, "Entry": closed.entry, "Exit price": closed.exit_price,
-                          "Result": closed.status.map(STATUS), PER100: closed.result_r * 100,
-                          "Profit / loss %": closed.pnl_pct, "Strategy": closed.setup})
-        st.dataframe(color(t, [PER100, "Profit / loss %"], {"Entry": MONEY, "Exit price": MONEY, PER100: GAIN,
-                                                             "Profit / loss %": "{:+.2f}%"}),
-                     hide_index=True, use_container_width=True)
+        sign = live.direction.map({"BUY": 1, "SELL": -1})
+        t = pd.DataFrame({"Suggested on": live.data_as_of, "Side": live.direction, "Symbol": live.symbol,
+                          "Company": live["name"], "Horizon": live.horizon.map(LABEL), "Entry": live.entry,
+                          "Price now": live.last_price, "Profit / loss %": live.pnl_pct, "Profit / loss ₹": live.pnl_rs,
+                          "Stop-loss": live.stop, "To stop-loss": sign * (live.last_price / live.stop - 1) * 100,
+                          "Target": live.target, "To target": sign * (live.target / live.last_price - 1) * 100,
+                          "Days in trade": live.days, "Hold days": live.hold_days, "Result": live.Result,
+                          "Strategy": live.setup})
+        if len(t) > 1000:
+            st.caption(f"Showing the newest 1,000 of {len(t):,} open trades.")
+        st.dataframe(color(t.head(1000), signed, fmt), hide_index=True, use_container_width=True, column_config={
+            "To stop-loss": st.column_config.Column(help="How far the price can still fall before the stop-loss sells it"),
+            "To target": st.column_config.Column(help="How far the price still has to go. — = no fixed target")})
+
+    done = d[d.state == "closed"].sort_values("closed_on")
+    if len(done):
+        st.subheader("Money over time")
+        st.line_chart(done.groupby("closed_on").pnl_rs.sum().cumsum().rename("Booked profit / loss (₹)"))
+        st.subheader("Where the results come from")
+        band = (done.confidence < config.MIN_WIN_PROB * 100).map(
+            {True: f"Under {config.MIN_WIN_PROB:.0%}", False: f"{config.MIN_WIN_PROB:.0%} and above"})
+        groups = [(done.horizon.map(LABEL), "Horizon"), (done.setup, "Strategy"), (done.closed_on.str[:7], "Month closed"),
+                  (band, "Chance to win when suggested")]
+        if "ai_verdict" in done:
+            groups.append((done.ai_verdict, "AI verdict"))
+        for col, label in groups:
+            g = done.groupby(col.rename(label)).agg(
+                **{"Closed trades": ("id", "count"), "Accuracy": ("pnl_pct", lambda x: (x > 0).mean() * 100),
+                   "Target hit": ("status", lambda x: (x == "TARGET_HIT").sum()),
+                   "Stop-loss hit": ("status", lambda x: (x == "SL_HIT").sum()),
+                   "Profit / loss ₹": ("pnl_rs", "sum"), "Profit / loss %": ("pnl_pct", "mean")})
+            st.dataframe(color(g, signed, fmt), use_container_width=True,
+                         column_config={"Profit / loss %": st.column_config.Column(help="Average per trade")})
+
+    st.subheader(f"Full diary, newest first ({len(d)})")
+    pick = st.multiselect("Show", sorted(d.Result.dropna().unique()), key="diary_filter", placeholder="All results")
+    v = d[d.Result.isin(pick)] if pick else d
+    if len(v) > 1000:  # the table shows the newest 1,000; the download has everything
+        st.caption(f"Showing the newest 1,000 of {len(v):,}. Use the download for all of them.")
+    t = pd.DataFrame({"Suggested on": v.data_as_of, "Side": v.direction, "Symbol": v.symbol, "Company": v["name"],
+                      "Horizon": v.horizon.map(LABEL), "Entry": v.entry, "Stop-loss": v.stop, "Target": v.target,
+                      "Result": v.Result, "Closed on": v.closed_on, "Exit price": v.exit_price,
+                      "Price now": v.last_price.where(v.state == "open"), "Days held": v.days,
+                      "Profit / loss %": v.pnl_pct, "Profit / loss ₹": v.pnl_rs, PER100: v.per100,
+                      "Chance to win (at suggestion)": v.confidence, "Strategy": v.setup})
+    st.dataframe(color(t.head(1000), signed, {**fmt, "Chance to win (at suggestion)": PCT}), hide_index=True,
+                 use_container_width=True, column_config={PER100: st.column_config.Column(help=PER100_HELP)})
+    st.download_button("Download diary (CSV)", t.to_csv(index=False), "trade_diary.csv", "text/csv")
+
+
+def strategies():
+    st.header("Strategies")
     st.subheader("Strategies: tested on 8 years of past prices (last 2 years kept unseen), and live results")
     stats = q("SELECT setup AS Strategy, generation AS Generation, horizon AS Horizon, trades AS Trades, "
               "hit_rate * 100 AS \"Win rate\", avg_r * 100 AS \"Profit per ₹100 risked\", "
@@ -307,7 +397,8 @@ pg = st.navigation([
     st.Page(horizon_page("longterm"), title="Long-term", icon="🌱", url_path="longterm"),
     st.Page(overview, title="Market overview", icon="🌍"),
     st.Page(news_page, title="News", icon="📰"),
-    st.Page(performance, title="Performance", icon="🏁"),
+    st.Page(diary_page, title="Trade diary", icon="📒"),
+    st.Page(strategies, title="Strategies", icon="🏁"),
     st.Page(system_status, title="Background jobs", icon="⚙️"),
 ])
 pg.run()
